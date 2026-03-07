@@ -4,7 +4,7 @@
 cd "$(dirname "$0")"
 
 # Collect a list of all language folders
-LANGS=$(find ./Languages -maxdepth 1 -type d -name "SilverDB.*.LE" -printf "%f\n" | sort)
+LANGS=$(find ./Languages -maxdepth 1 -type d -name "SilverDB.*.LE" -exec basename {} \; | sort)
 
 i=1
 echo "Select languages for packaging:"
