@@ -7,6 +7,9 @@ You can find pre-made themes from [NanoLib](http://nanolib.net) and [NanoVault](
 
 ### Latest updates
 
+### 03/08/2026
+•MacOS Hotfix(Language packing issues) 
+
 #### 02/01/2026:
 •Windows native support 
 
