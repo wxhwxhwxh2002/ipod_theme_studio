@@ -5,6 +5,37 @@ Be sure to check out community forks and projects with additional features. [ass
 
 You can find pre-made themes from [NanoLib](http://nanolib.net) and [NanoVault](https://github.com/g0lder/NanoVault), join [iPod nano 6/7 Themes discord server](https://discord.gg/SfWYYPUAEZ) to share and download even more pre-made themes, and [iPod nano hacking discord server](https://discord.gg/7PnGEXjW3X) for hacking iPod nano, then share your themes and setup with [r/ipod](https://www.reddit.com/r/ipod/)!
 
+## This Fork
+
+This fork adds an early desktop GUI workflow for Windows-oriented theme editing while keeping the original command-line workflow intact.
+
+- Chinese README for this fork: [README.zh-CN.md](README.zh-CN.md)
+- Original upstream project: [nfzerox/ipod_theme](https://github.com/nfzerox/ipod_theme)
+- License remains GPL-3.0, following the upstream project
+
+### Added work in this fork
+
+- Added `theme_studio.py`, a desktop GUI for browsing, previewing, replacing, and repacking artwork
+- Added `theme_studio_core.py`, which wraps the unpack/replace/repack workflow for official firmware and community IPSW files
+- Added Windows-friendly launch/build helpers: `run_theme_studio.bat` and `build_theme_studio_exe.bat`
+- Added artwork preview improvements, Nano 7 quick grouping shortcuts, and basic capacity-risk reminders for assets promoted to `_1888`
+- Added an About page in the GUI with upstream attribution and GPL-3.0 notice
+- Improved Windows Python handling in `src/main.rs` so unpacking is more reliable when using a venv or conda environment
+- Documented the missing Python dependency `fs`
+
+### Current GUI scope
+
+The current GUI is focused on artwork workflows:
+
+- Device selection: nano 6, nano 7 (2012), nano 7 (2015)
+- Import official firmware or a community IPSW
+- Unpack and preview artwork
+- Replace artwork with automatic size checks
+- Auto-promote some palette-based assets to `_1888.png` when the replacement image exceeds the original color limit
+- Repack a modified IPSW for flashing through iTunes / Apple Devices
+
+The original CLI tutorial below is still the authoritative upstream workflow and remains available as-is.
+
 ### Latest updates
 
 ### 03/08/2026
