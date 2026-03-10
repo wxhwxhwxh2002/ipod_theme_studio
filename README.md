@@ -1,5 +1,8 @@
-# ipod_theme
-Theme your iPod nano 7th and 6th generation with custom icons, wallpapers, clock faces, change or hide labels, apply custom font, and more. Based on [ipod_sun](https://github.com/CUB3D/ipod_sun), [ipodhax](https://github.com/760ceb3b9c0ba4872cadf3ce35a7a494/ipodhax), and [silverutil](https://github.com/spotlightishere/silverutil), who collectively made 99.9% of the research and code to get us here.
+# iPod Theme Studio
+
+A GUI-focused fork of [nfzerox/ipod_theme](https://github.com/nfzerox/ipod_theme) for editing and repacking iPod nano themes with a more approachable desktop workflow.
+
+This project still builds on the original `ipod_theme` work, which itself is based on [ipod_sun](https://github.com/CUB3D/ipod_sun), [ipodhax](https://github.com/760ceb3b9c0ba4872cadf3ce35a7a494/ipodhax), and [silverutil](https://github.com/spotlightishere/silverutil).
 
 Be sure to check out community forks and projects with additional features. [asset replacer](https://assetreplacer.zeehondie.net/) lets you create themes with a graphical interface right from your browser. And thanks to [TGRgitx](https://github.com/TGRgitx)'s generous contributions, this repo now includes enhancements from [ipod_theme_max_features](https://github.com/TISgitx/ipod_theme_max_features), which adds support for customizing sounds, modifying localization text for additional languages, and untethered boot for iPod nano 7th generation so you don't have to manually restart from disk mode.
 
@@ -7,7 +10,7 @@ You can find pre-made themes from [NanoLib](http://nanolib.net) and [NanoVault](
 
 ## This Fork
 
-This fork adds an early desktop GUI workflow for Windows-oriented theme editing while keeping the original command-line workflow intact.
+This fork repositions the project as `iPod Theme Studio`: a friendlier desktop-oriented layer on top of the original `ipod_theme` workflow, while keeping the upstream command-line process intact.
 
 - Chinese README for this fork: [README.zh-CN.md](README.zh-CN.md)
 - Original upstream project: [nfzerox/ipod_theme](https://github.com/nfzerox/ipod_theme)

@@ -1,6 +1,6 @@
-# iPod Theme Studio 中文说明
+# iPod Theme Studio
 
-这是基于上游项目 [nfzerox/ipod_theme](https://github.com/nfzerox/ipod_theme) 继续开发的一个 fork，目标是把原本偏命令行的 iPod nano 主题制作流程，逐步整理成更适合普通用户使用的图形界面工具。
+这是基于上游项目 [nfzerox/ipod_theme](https://github.com/nfzerox/ipod_theme) 继续开发的一个 GUI 定位 fork，目标是把原本偏命令行的 iPod nano 主题制作流程，逐步整理成更适合普通用户使用的桌面图形界面工具。
 
 原项目许可证为 GPL-3.0，本 fork 继续遵守 GPL-3.0。
 
