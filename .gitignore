@@ -9,4 +9,8 @@ build.sh
 *.pyc
 *.ipsw
 /body
+/studio_workspace
+/Sounds
+/Languages
+/iPodTZData.dat
 *.LE

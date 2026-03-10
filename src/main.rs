@@ -22,6 +22,32 @@ use walkdir::WalkDir;
 use zip::write::FileOptions;
 use tracing::log::debug;
 
+fn resolve_python() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
+            let candidate = Path::new(&prefix).join("python.exe");
+            if candidate.exists() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+
+        if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+            let candidate = Path::new(&venv).join("Scripts").join("python.exe");
+            if candidate.exists() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+
+        "python".to_string()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        "python3".to_string()
+    }
+}
+
 // Searches for `pattern` in `data` and replaces the last byte of the found sequence with `new_last_byte`.
 // Returns `Some(offset)` where offset is the position of the replaced byte (index within data), or `None` if not found.
 fn patch_pattern_in_vec(data: &mut [u8], pattern: &[u8], new_last_byte: u8) -> Option<usize> {
@@ -89,15 +115,9 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .init();
-        
-    #[cfg(target_os = "windows")]
-    const PYTHON: &str = "python";
-    
-    #[cfg(not(target_os = "windows"))]
-    const PYTHON: &str = "python3";
-    
-    
-    debug!("Using python binary: {}", PYTHON);
+
+    let python = resolve_python();
+    debug!("Using python binary: {}", python);
     
     
     let args = Args::parse();
@@ -173,9 +193,12 @@ fn main() -> anyhow::Result<()> {
             std::fs::write("rsrc.bin", &img1.body)?;
             // std::fs::write("in-otf.bin", otf_bytes)?;
 
-            Command::new(PYTHON)
+            let fat_patch = Command::new(&python)
                 .arg("./helpers/fat_patch.py")
                 .status()?;
+            if !fat_patch.success() {
+                return Err(anyhow!("helpers/fat_patch.py failed with status: {fat_patch}"));
+            }
 
             let rsrc_data = std::fs::read("./rsrc.bin")?;
             std::fs::remove_file("./rsrc.bin")?;

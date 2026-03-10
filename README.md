@@ -66,17 +66,17 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
 
-[7] Install `pyfatfs`, `fonttools`, and `pillow`:
+[7] Install `fs`, `pyfatfs`, `fonttools`, and `pillow`:
 
 For MacOS and Linux:
 
 ```shell
-export PIP_BREAK_SYSTEM_PACKAGES=1 && pip3 install pyfatfs fonttools pillow
+export PIP_BREAK_SYSTEM_PACKAGES=1 && pip3 install fs pyfatfs fonttools pillow
 ```
 
 For Windows, execute and close terminal:
 ```shell
-pip3 install pyfatfs fonttools pillow
+pip3 install fs pyfatfs fonttools pillow
 ```
 
 #### 1) Download and unpack iPod firmware:
