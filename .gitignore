@@ -10,6 +10,7 @@ build.sh
 *.ipsw
 /body
 /studio_workspace
+/portable_bundle
 /Sounds
 /Languages
 /iPodTZData.dat

@@ -12,6 +12,7 @@
 - 新增核心工作流封装 [theme_studio_core.py](theme_studio_core.py)
 - 新增 Windows 启动脚本 [run_theme_studio.bat](run_theme_studio.bat)
 - 新增用于打包的 [build_theme_studio_exe.bat](build_theme_studio_exe.bat)
+- 新增便携整合包构建脚本 [build_portable_bundle.bat](build_portable_bundle.bat)，可以生成自带 Python 运行时的免安装目录
 - 改善了素材预览、Nano 7 素材分组跳转、以及 `_1888` 升格后的容量风险提醒
 - 内置大图裁剪 / 缩放流程，替换壁纸时可以直接在 GUI 里完成取景
 - 使用更高质量的缩图链路，降低大图缩到小分辨率时的模糊和颗粒感
@@ -43,6 +44,17 @@
 - 收藏库支持对 `1888` 素材手动降色
 - 重新打包生成新的 IPSW
 - 显示 `SilverImagesDB` 体积变化，作为简单的容量风险提醒
+
+## 便携整合包
+
+现在这个 fork 也支持面向普通 Windows 用户的“免安装整合包”分发方式。
+
+- 运行 `build_portable_bundle.bat` 后，会在 `portable_bundle/iPodThemeStudio_Portable` 下生成整合包目录
+- 生成的目录里会自带本地 Python 运行时、GUI 程序和所需模板资源
+- 用户只需要解压整个文件夹，然后双击 `launch_theme_studio_portable.bat` 即可启动
+- 这套 GUI 便携流程不再要求用户额外安装 Rust、Cargo 或 `arm-none-eabi-gcc`
+
+整合包目录本身主要用于网盘或压缩包分发，不直接提交到仓库。
 
 ## 当前还没完全做完的部分
 

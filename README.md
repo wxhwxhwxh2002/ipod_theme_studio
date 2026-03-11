@@ -23,6 +23,7 @@ This fork repositions the project as `iPod Theme Studio`: a friendlier desktop-o
 - Added `theme_studio.py`, a desktop GUI for browsing, previewing, replacing, and repacking artwork
 - Added `theme_studio_core.py`, which wraps the unpack/replace/repack workflow for official firmware and community IPSW files
 - Added Windows-friendly launch/build helpers: `run_theme_studio.bat` and `build_theme_studio_exe.bat`
+- Added a portable bundle workflow through `build_portable_bundle.bat`, so Windows users can ship a no-install folder with a bundled Python runtime
 - Added artwork preview improvements, Nano 7 quick grouping shortcuts, and basic capacity-risk reminders for assets promoted to `_1888`
 - Added built-in crop / resize flow for oversized images, with higher-quality downscaling for wallpaper replacement
 - Added manual reduction preview and strategy selection for turning `1888` artwork into `0064` or `0065`
@@ -49,6 +50,17 @@ The current GUI is focused on artwork workflows:
 - Search the saved library by filename or note, edit notes, delete saved items, and reuse saved assets as replacement sources
 - Manually reduce saved-library `1888` assets to lower-color formats
 - Repack a modified IPSW for flashing through iTunes / Apple Devices
+
+### Portable bundle
+
+This fork now also supports a Windows-friendly portable distribution model for non-technical users.
+
+- Run `build_portable_bundle.bat` to create a self-contained folder at `portable_bundle/iPodThemeStudio_Portable`
+- The generated folder bundles a local Python runtime plus the GUI app and its required templates
+- End users can launch the tool by double-clicking `launch_theme_studio_portable.bat`
+- The GUI workflow in this portable bundle does not require Rust, Cargo, or `arm-none-eabi-gcc`
+
+The bundle itself is intended for release archives or cloud-drive sharing and is not committed into the repo.
 
 The original CLI tutorial below is still the authoritative upstream workflow and remains available as-is.
 
