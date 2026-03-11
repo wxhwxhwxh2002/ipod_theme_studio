@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import math
 import os
 import queue
 import shutil
@@ -21,7 +22,7 @@ except ImportError:  # pragma: no cover - optional runtime acceleration
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
-from theme_studio_core import APP_ROOT, ThemeStudio, StudioError, WORK_INPUTS
+from theme_studio_core import APP_ROOT, ThemeStudio, StudioError, WORK_INPUTS, _detect_saved_artwork_format
 
 
 BG = "#edf2f7"
@@ -64,6 +65,85 @@ def ui_font(size: int, bold: bool = False) -> tuple[str, int, str]:
 
 def mono_font(size: int) -> tuple[str, int]:
     return (MONO_FONT_FAMILY, size)
+
+
+def image_color_count(image: Image.Image) -> int:
+    return len(set(image.convert("RGBA").getdata()))
+
+
+def rgb565_like_image(image: Image.Image) -> Image.Image:
+    rgb = image.convert("RGB")
+    if np is not None:
+        data = np.array(rgb, dtype=np.uint8)
+        data[..., 0] = (data[..., 0] >> 3) << 3
+        data[..., 1] = (data[..., 1] >> 2) << 2
+        data[..., 2] = (data[..., 2] >> 3) << 3
+        return Image.fromarray(data, "RGB").convert("RGBA")
+
+    red, green, blue = rgb.split()
+    red = red.point(lambda value: (value >> 3) << 3)
+    green = green.point(lambda value: (value >> 2) << 2)
+    blue = blue.point(lambda value: (value >> 3) << 3)
+    return Image.merge("RGB", (red, green, blue)).convert("RGBA")
+
+
+def manual_format_conversion_actions() -> list[tuple[str, str, bool]]:
+    return [
+        ("0565", "转到 0565（RGB565）", True),
+        ("0065", "转到 0065（<=65535 色）", False),
+        ("0064", "转到 0064（<=255 色）", False),
+        ("0008", "转到 0008（8 位灰度）", False),
+        ("0004", "转到 0004（4 位灰度）", False),
+        ("cancel", "取消", False),
+    ]
+
+
+def manual_format_conversion_actions_for(current_format: str) -> list[tuple[str, str, bool]]:
+    mapping = {
+        "1888": ["0565", "0065", "0064", "0008", "0004"],
+        "0565": ["0065", "0064", "0008", "0004"],
+        "0065": ["0064", "0008", "0004"],
+        "0064": ["0008", "0004"],
+        "0008": ["0004"],
+    }
+    labels = {
+        "0565": "转到 0565（RGB565）",
+        "0065": "转到 0065（<=65535 色）",
+        "0064": "转到 0064（<=255 色）",
+        "0008": "转到 0008（8 位灰度）",
+        "0004": "转到 0004（4 位灰度）",
+    }
+    targets = mapping.get(current_format, [])
+    if not targets:
+        return [("cancel", "取消", False)]
+    return [(targets[0], labels[targets[0]], True)] + [
+        (target, labels[target], False) for target in targets[1:]
+    ] + [("cancel", "取消", False)]
+
+
+LOW_FORMAT_ORDER = ["0004", "0008", "0064", "0065", "0565"]
+FORMAT_RANK = {fmt: index for index, fmt in enumerate(LOW_FORMAT_ORDER + ["1888"])}
+
+
+def full_conversion_actions(target_format: str) -> list[tuple[str, str, bool]]:
+    mapping = {
+        "0004": [("0004", "转到 0004", False), ("0008", "转到 0008", False), ("0064", "转到 0064", False), ("0065", "转到 0065", True), ("1888", "保持 1888", False)],
+        "0008": [("0008", "转到 0008", False), ("0064", "转到 0064", False), ("0065", "转到 0065", True), ("1888", "保持 1888", False)],
+        "0064": [("0064", "转到 0064", False), ("0065", "转到 0065", True), ("1888", "保持 1888", False)],
+        "0065": [("0065", "转到 0065", True), ("1888", "保持 1888", False)],
+        "0565": [("0565", "转到 0565", True), ("0065", "转到 0065", False), ("0064", "转到 0064", False), ("0008", "转到 0008", False), ("0004", "转到 0004", False), ("1888", "保持 1888", False)],
+    }
+    return mapping.get(target_format, [("1888", "保持 1888", True)]) + [("cancel", "取消", False)]
+
+
+def lower_format_actions(direct_format: str) -> list[tuple[str, str, bool]]:
+    if direct_format not in LOW_FORMAT_ORDER:
+        return []
+    direct_index = LOW_FORMAT_ORDER.index(direct_format)
+    return [
+        (fmt, f"尝试降到 {fmt}", False)
+        for fmt in reversed(LOW_FORMAT_ORDER[:direct_index])
+    ]
 
 
 def button_style(variant: str = "secondary") -> dict[str, object]:
@@ -582,12 +662,13 @@ class ActionChoiceDialog:
         longest_line = max((len(line) for line in message.splitlines()), default=0)
         longest_label = max((len(label) for _, label, _ in actions), default=0)
         button_count = max(len(actions), 1)
+        button_rows = max(1, math.ceil(button_count / 3))
 
-        dialog_width = max(520, min(760, 220 + longest_line * 7 + button_count * 90 + longest_label * 8))
-        dialog_height = max(280, min(560, 200 + message_lines * 24))
+        dialog_width = max(680, min(980, 280 + longest_line * 7 + min(button_count, 3) * 170 + longest_label * 9))
+        dialog_height = max(320, min(640, 210 + message_lines * 24 + button_rows * 56))
 
         self.dialog.geometry(f"{dialog_width}x{dialog_height}")
-        self.dialog.minsize(500, 260)
+        self.dialog.minsize(660, 300)
         self.dialog.configure(bg=BG)
         self.dialog.transient(parent)
         self.dialog.grab_set()
@@ -616,6 +697,9 @@ class ActionChoiceDialog:
 
         button_row = tk.Frame(container, bg=CARD)
         button_row.grid(row=2, column=0, sticky="ew", pady=(18, 0))
+        buttons_per_row = 3 if len(actions) > 3 else max(len(actions), 1)
+        for column in range(buttons_per_row):
+            button_row.columnconfigure(column, weight=1)
 
         for index, (value, label, primary) in enumerate(actions):
             tk.Button(
@@ -628,7 +712,13 @@ class ActionChoiceDialog:
                 padx=14,
                 pady=9,
                 font=("Segoe UI Semibold", 10),
-            ).pack(side="left", padx=(0 if index == 0 else 10, 0))
+            ).grid(
+                row=index // buttons_per_row,
+                column=index % buttons_per_row,
+                sticky="ew",
+                padx=(0, 10) if index % buttons_per_row != buttons_per_row - 1 else (0, 0),
+                pady=(0, 10),
+            )
 
     def show(self) -> str | None:
         self.dialog.wait_window()
@@ -690,7 +780,7 @@ class ReductionPreviewDialog:
         description = (
             "推荐先保持 1888，只在你确认需要控体积或保留原低色格式时再降色。"
             if self.allow_keep_original
-            else "当前素材已经是 1888，这里可以手动尝试降到 0064 或 0065。"
+            else "当前素材已经是 1888，这里可以手动尝试转换到 0565、0065、0064、0008 或 0004。"
         )
         tk.Label(
             container,
@@ -745,7 +835,7 @@ class ReductionPreviewDialog:
         reduced_card.grid(row=0, column=1, sticky="nsew", padx=(16, 0))
         tk.Label(
             reduced_card,
-            text="降色预览",
+            text="转换预览",
             bg="#f7f1e7",
             fg=TEXT,
             font=("Segoe UI Semibold", 10),
@@ -781,7 +871,7 @@ class ReductionPreviewDialog:
 
         tk.Button(
             buttons,
-            text="应用当前降色",
+            text="应用当前转换",
             command=self._apply_reduced,
             **button_style("primary"),
             relief="flat",
@@ -1240,7 +1330,7 @@ class SavedAssetBrowserDialog:
         ).pack(side="left", padx=(10, 0))
         tk.Button(
             buttons,
-            text="1888 降色",
+            text="手动改色彩",
             command=self._resize_selected_saved_asset,
             **button_style("secondary"),
             relief="flat",
@@ -1324,7 +1414,7 @@ class SavedAssetBrowserDialog:
 
     def _normalize_saved_button_labels(self) -> None:
         buttons = [widget for widget in self.button_bar.winfo_children() if isinstance(widget, tk.Button)]
-        labels = ["从电脑导入", "编辑备注", "调整尺寸", "1888 降色", "删除收藏", "打开收藏目录", "刷新列表"]
+        labels = ["从电脑导入", "编辑备注", "调整尺寸", "手动改色彩", "删除收藏", "打开收藏目录", "刷新列表"]
         for widget, label in zip(buttons, labels):
             widget.configure(text=label)
 
@@ -1648,7 +1738,7 @@ class SavedAssetBrowserDialog:
             ("从电脑导入", self._import_from_computer),
             ("编辑备注", self._edit_note),
             ("调整尺寸", self._resize_selected_saved_asset),
-            ("1888 降色", self._reduce_selected_saved_asset),
+            ("手动改色彩", self._reduce_selected_saved_asset),
             ("删除收藏", self._delete_selected),
             ("打开收藏目录", self._open_saved_dir),
             ("刷新列表", self._load_items),
@@ -2270,7 +2360,7 @@ class ThemeStudioApp:
 
         reduce_btn = tk.Button(
             action_row,
-            text="对当前 1888 降色",
+            text="手动改色彩",
             command=self._reduce_color_and_replace,
             **button_style("secondary"),
             relief="flat",
@@ -3210,7 +3300,7 @@ class ThemeStudioApp:
         target_format: str,
         allow_keep_original: bool = True,
     ) -> tuple[str, str]:
-        title = "是否尝试降色到原格式" if allow_keep_original else "对当前 1888 素材降色"
+        title = "是否尝试转换到原格式" if allow_keep_original else "对当前 1888 素材转换格式"
         dialog = ReductionPreviewDialog(
             self.root,
             source_path,
@@ -3235,7 +3325,7 @@ class ThemeStudioApp:
         output_path = WORK_INPUTS / f"{target_stem}_reduced_{target_format}_{timestamp}.png"
         WORK_INPUTS.mkdir(parents=True, exist_ok=True)
         reduced.save(output_path, "PNG")
-        return output_path, [f"已按“{strategy}”策略手动降到 {target_format}。"]
+        return output_path, [f"已按“{strategy}”策略手动转换到 {target_format}。"]
 
     def _render_reduced_image_for_strategy(
         self,
@@ -3243,6 +3333,21 @@ class ThemeStudioApp:
         target_format: str,
         strategy: str,
     ) -> Image.Image:
+        if target_format in {"0004", "0008"}:
+            working = source_image.convert("L")
+            if strategy == "平滑":
+                working = working.filter(ImageFilter.GaussianBlur(radius=0.35))
+                dither = Image.Dither.NONE
+            elif strategy == "锐利":
+                working = working.filter(ImageFilter.UnsharpMask(radius=0.6, percent=120, threshold=2))
+                dither = Image.Dither.FLOYDSTEINBERG
+            else:
+                dither = Image.Dither.NONE
+
+            colors = 16 if target_format == "0004" else 256
+            reduced = working.quantize(colors=colors, method=Image.Quantize.FASTOCTREE, dither=dither)
+            return reduced.convert("RGBA")
+
         if target_format == "0064":
             working = source_image.convert("RGBA")
             if strategy == "平滑":
@@ -3257,37 +3362,144 @@ class ThemeStudioApp:
             return reduced.convert("RGBA")
 
         if target_format == "0065":
-            working = source_image.convert("RGB")
+            working = source_image.convert("RGBA")
             if strategy == "平滑":
                 working = working.filter(ImageFilter.GaussianBlur(radius=0.35))
             elif strategy == "锐利":
                 working = working.filter(ImageFilter.UnsharpMask(radius=0.6, percent=120, threshold=2))
 
-            if np is not None:
-                data = np.array(working, dtype=np.uint8)
-                data[..., 0] = (data[..., 0] >> 3) << 3
-                data[..., 1] = (data[..., 1] >> 2) << 2
-                data[..., 2] = (data[..., 2] >> 3) << 3
-                return Image.fromarray(data, "RGB").convert("RGBA")
+            if image_color_count(working) <= 65535:
+                return working.convert("RGBA")
 
-            red, green, blue = working.split()
-            red = red.point(lambda value: (value >> 3) << 3)
-            green = green.point(lambda value: (value >> 2) << 2)
-            blue = blue.point(lambda value: (value >> 3) << 3)
-            return Image.merge("RGB", (red, green, blue)).convert("RGBA")
+            return rgb565_like_image(working)
 
-        raise StudioError(f"当前暂不支持预览 {target_format} 的降色效果。")
+        if target_format == "0565":
+            working = source_image.convert("RGBA")
+            if strategy == "平滑":
+                working = working.filter(ImageFilter.GaussianBlur(radius=0.35))
+            elif strategy == "锐利":
+                working = working.filter(ImageFilter.UnsharpMask(radius=0.6, percent=120, threshold=2))
+
+            return rgb565_like_image(working)
+
+        raise StudioError(f"当前暂不支持预览 {target_format} 的格式转换效果。")
 
     def _append_replacement_notes_to_log(self, notes: list[str]) -> None:
         for note in notes:
-            if "1888" in note or "降到" in note or "手动按" in note:
+            if "1888" in note or "降到" in note or "转换到" in note or "手动按" in note:
                 self._append_log("log", note)
 
     def _replacement_source_format(self) -> str:
         item = getattr(self, "_last_replacement_item", None)
         if isinstance(item, dict):
+            path = item.get("path", "")
+            if path:
+                detected = _detect_saved_artwork_format(Path(path))
+                if detected:
+                    return detected
             return item.get("format", "")
         return ""
+
+    def _candidate_meets_output_format(self, candidate_path: Path, output_format: str) -> bool:
+        with Image.open(candidate_path) as image:
+            rgba = image.convert("RGBA")
+            pixels = set(rgba.getdata())
+            color_count = len(pixels)
+            opaque_only = all(alpha == 255 for _red, _green, _blue, alpha in pixels)
+
+            if output_format == "1888":
+                return True
+            if output_format == "0004":
+                rgb_colors = {(r, g, b) for r, g, b, _a in rgba.getdata()}
+                return opaque_only and all(r == g == b for r, g, b in rgb_colors) and len(rgb_colors) <= 16
+            if output_format == "0008":
+                rgb_colors = {(r, g, b) for r, g, b, _a in rgba.getdata()}
+                return opaque_only and all(r == g == b for r, g, b in rgb_colors) and len(rgb_colors) <= 256
+            if output_format == "0064":
+                return color_count <= 255
+            if output_format == "0065":
+                return color_count <= 65535
+            if output_format == "0565":
+                rgb_colors = {(r, g, b) for r, g, b, _a in rgba.getdata()}
+                return opaque_only and all(r % 8 == 0 and g % 4 == 0 and b % 8 == 0 for r, g, b in rgb_colors)
+        return False
+
+    def _choose_low_color_output_format(
+        self,
+        target_format: str,
+        prepared_format: str,
+        prepared_candidate: Path,
+        show_direct_notice: bool,
+    ) -> tuple[str, bool] | None:
+        if target_format == "1888":
+            direct_format = prepared_format or "1888"
+            if show_direct_notice:
+                messagebox.showinfo(
+                    "已满足原格式",
+                    f"已满足原图格式或更低格式，接下来会直接写回。\n\n原格式：1888\n新图：{direct_format}",
+                    parent=self.root,
+                )
+            return direct_format, False
+
+        if target_format not in {"0004", "0008", "0064", "0065", "0565"}:
+            return None
+
+        if target_format == "0565":
+            direct_candidates = [
+                fmt for fmt in LOW_FORMAT_ORDER if self._candidate_meets_output_format(prepared_candidate, fmt)
+            ]
+        else:
+            direct_candidates = [
+                fmt
+                for fmt in ("0004", "0008", "0064", "0065")
+                if self._candidate_meets_output_format(prepared_candidate, fmt)
+            ]
+
+        if prepared_format in direct_candidates:
+            direct_format = prepared_format
+        else:
+            direct_format = direct_candidates[0] if direct_candidates else "1888"
+
+        if direct_format != "1888" and FORMAT_RANK[direct_format] <= FORMAT_RANK[target_format]:
+            if show_direct_notice:
+                messagebox.showinfo(
+                    "已满足原格式",
+                    f"已满足原图格式或更低格式，接下来会直接写回。\n\n原格式：{target_format}\n新图：{direct_format}",
+                    parent=self.root,
+                )
+            return direct_format, False
+
+        if direct_format != "1888":
+            actions: list[tuple[str, str, bool]] = [
+                (direct_format, f"直接写回 {direct_format}（推荐）", True),
+                *lower_format_actions(direct_format),
+                ("cancel", "取消", False),
+            ]
+            choice = ActionChoiceDialog(
+                self.root,
+                "当前图片已经满足较高的低色格式",
+                (
+                    f"调整尺寸后的新图已经满足 {direct_format}，但原素材是 {target_format}。\n\n"
+                    "你可以直接写回当前格式，或者继续往更低的格式转换。"
+                ),
+                actions,
+            ).show()
+            if choice in {None, "cancel"}:
+                return None
+            return choice, choice != direct_format
+
+        choice = ActionChoiceDialog(
+            self.root,
+            "替换时使用什么格式",
+            (
+                f"当前目标素材原本是 {target_format}，调整尺寸后的新图仍然属于 1888。\n\n"
+                "请选择这次最终要写回成什么格式。只要继续往低色格式转换，就会进入预览。"
+            ),
+            full_conversion_actions(target_format),
+        ).show()
+        if choice in {None, "cancel"}:
+            return None
+        return choice, choice != "1888"
 
     def _prepare_candidate_for_saved_format(
         self,
@@ -3304,38 +3516,7 @@ class ThemeStudioApp:
         output_path = WORK_INPUTS / f"{target_stem}_preserve_{preferred_format}_{timestamp}.png"
 
         with Image.open(candidate_path) as image:
-            if preferred_format == "0004":
-                prepared = image.convert("L").quantize(
-                    colors=16,
-                    method=Image.Quantize.FASTOCTREE,
-                    dither=Image.Dither.NONE,
-                ).convert("RGBA")
-            elif preferred_format == "0008":
-                prepared = image.convert("L").quantize(
-                    colors=256,
-                    method=Image.Quantize.FASTOCTREE,
-                    dither=Image.Dither.NONE,
-                ).convert("RGBA")
-            elif preferred_format == "0064":
-                prepared = image.convert("RGBA").quantize(
-                    colors=255,
-                    method=Image.Quantize.FASTOCTREE,
-                    dither=Image.Dither.NONE,
-                ).convert("RGBA")
-            else:
-                rgb = image.convert("RGB")
-                if np is not None:
-                    data = np.array(rgb, dtype=np.uint8)
-                    data[..., 0] = (data[..., 0] >> 3) << 3
-                    data[..., 1] = (data[..., 1] >> 2) << 2
-                    data[..., 2] = (data[..., 2] >> 3) << 3
-                    prepared = Image.fromarray(data, "RGB").convert("RGBA")
-                else:
-                    red, green, blue = rgb.split()
-                    red = red.point(lambda value: (value >> 3) << 3)
-                    green = green.point(lambda value: (value >> 2) << 2)
-                    blue = blue.point(lambda value: (value >> 3) << 3)
-                    prepared = Image.merge("RGB", (red, green, blue)).convert("RGBA")
+            prepared = self._render_reduced_image_for_strategy(image, preferred_format, "保守")
 
         prepared.save(output_path, "PNG")
         return output_path, [f"已按收藏素材的 {preferred_format} 格式特性处理 resize 后的中间图。"]
@@ -3433,7 +3614,9 @@ class ThemeStudioApp:
             return
 
         target_format = self.current_selection.split("_", 1)[1].split(".", 1)[0]
-        source_format = self._replacement_source_format()
+        source_format = self._replacement_source_format() or _detect_saved_artwork_format(candidate)
+        prepared_format = _detect_saved_artwork_format(prepared_candidate)
+        show_direct_notice = prepared_candidate != candidate
         replacement_candidate = prepared_candidate
         pre_notes: list[str] = list(getattr(self, "_last_prepare_notes", []))
 
@@ -3443,33 +3626,72 @@ class ThemeStudioApp:
             messagebox.showerror("替换失败", str(exc))
             return
 
-        if target_format in {"0064", "0065"} and predicted_name.endswith("_1888.png"):
-            action, strategy = self._open_reduction_decision(prepared_candidate, target_format)
-            if action == "cancel":
-                return
-            if action == "reduced":
-                reduction_candidate, reduction_notes = self._create_reduced_candidate(
-                    self.current_selection,
-                    prepared_candidate,
-                    target_format,
-                    strategy,
-                )
-                replacement_candidate = reduction_candidate
-                pre_notes = list(getattr(self, "_last_prepare_notes", [])) + reduction_notes
-
-        try:
-            if target_format == "1888" and source_format in {"0004", "0008", "0064", "0065", "0565"}:
-                new_name, notes = self.studio.replace_artwork_with_format(
-                    self.current_selection,
-                    replacement_candidate,
-                    source_format,
-                )
-                notes = [f"已按收藏素材的 {source_format} 格式写回当前素材。"] + notes
-            else:
-                new_name, notes = self.studio.replace_artwork(self.current_selection, replacement_candidate)
-        except StudioError as exc:
-            messagebox.showerror("替换失败", str(exc))
+        selected_output = self._choose_low_color_output_format(
+            target_format,
+            prepared_format,
+            prepared_candidate,
+            show_direct_notice,
+        )
+        if selected_output is None and target_format in {"0004", "0008", "0064", "0065", "0565", "1888"}:
             return
+
+        if selected_output is not None:
+            selected_output_format, needs_preview = selected_output
+            if selected_output_format == "1888":
+                try:
+                    new_name, notes = self.studio.replace_artwork_with_format(
+                        self.current_selection,
+                        replacement_candidate,
+                        "1888",
+                    )
+                except StudioError as exc:
+                    messagebox.showerror("替换失败", str(exc))
+                    return
+                pre_notes.append("已按你的选择保持 1888。")
+            else:
+                if needs_preview:
+                    action, strategy = self._open_reduction_decision(
+                        prepared_candidate,
+                        selected_output_format,
+                        allow_keep_original=False,
+                    )
+                    if action != "reduced":
+                        return
+                    reduction_candidate, reduction_notes = self._create_reduced_candidate(
+                        self.current_selection,
+                        prepared_candidate,
+                        selected_output_format,
+                        strategy,
+                    )
+                    replacement_candidate = reduction_candidate
+                    pre_notes = list(getattr(self, "_last_prepare_notes", [])) + reduction_notes
+                else:
+                    replacement_candidate = prepared_candidate
+                    pre_notes.append(f"当前图片已经满足 {selected_output_format}，已直接按该格式写回。")
+
+                try:
+                    new_name, notes = self.studio.replace_artwork_with_format(
+                        self.current_selection,
+                        replacement_candidate,
+                        selected_output_format,
+                    )
+                except StudioError as exc:
+                    messagebox.showerror("替换失败", str(exc))
+                    return
+        else:
+            try:
+                if target_format == "1888" and source_format in {"0004", "0008", "0064", "0065", "0565"}:
+                    new_name, notes = self.studio.replace_artwork_with_format(
+                        self.current_selection,
+                        replacement_candidate,
+                        source_format,
+                    )
+                    notes = [f"已按收藏素材的 {source_format} 格式写回当前素材。"] + notes
+                else:
+                    new_name, notes = self.studio.replace_artwork(self.current_selection, replacement_candidate)
+            except StudioError as exc:
+                messagebox.showerror("替换失败", str(exc))
+                return
 
         all_notes = pre_notes + notes
         self._append_log("log", f"已替换 {self.current_selection} <- {candidate.name}")
@@ -3810,19 +4032,15 @@ def _theme_studio_import_file_to_saved_assets(self) -> Path | None:
 
 def _theme_studio_reduce_saved_library_asset(self, asset_path: Path, item: dict[str, str]) -> Path | None:
     current_format = item.get("format", "")
-    if current_format != "1888":
-        messagebox.showinfo("当前素材不适用", "素材库里的这个条目当前不是 1888，无需使用这个降色按钮。", parent=self.root)
+    if current_format == "0004":
+        messagebox.showinfo("当前素材不适用", "这张收藏素材已经是 0004 了，没有更低的格式可再转换。", parent=self.root)
         return None
 
     choice = ActionChoiceDialog(
         self.root,
-        "目标降色格式",
-        "请选择要把这张收藏素材降到哪个格式。",
-        [
-            ("0064", "降到 0064", True),
-            ("0065", "降到 0065", False),
-            ("cancel", "取消", False),
-        ],
+        "目标转换格式",
+        f"请选择要把这张 {current_format} 收藏素材转换到哪个更低的格式。",
+        manual_format_conversion_actions_for(current_format),
     ).show()
     if choice in {None, "cancel"}:
         return None
@@ -3846,7 +4064,7 @@ def _theme_studio_reduce_saved_library_asset(self, asset_path: Path, item: dict[
         messagebox.showerror("降色失败", str(exc), parent=self.root)
         return None
 
-    self._append_log("log", f"已将收藏素材降色为 {target_format}：{updated_path.name}")
+    self._append_log("log", f"已将收藏素材转换为 {target_format}：{updated_path.name}")
     self._append_replacement_notes_to_log(reduction_notes)
     return updated_path
 
@@ -3857,19 +4075,15 @@ def _theme_studio_reduce_color_and_replace(self) -> None:
         return
 
     current_format = self.current_selection.split("_", 1)[1].split(".", 1)[0]
-    if current_format != "1888":
-        messagebox.showinfo("当前素材不适用", "这个按钮现在只用于把当前已经是 1888 的素材手动降色。")
+    if current_format == "0004":
+        messagebox.showinfo("当前素材不适用", "这个素材已经是 0004 了，没有更低的格式可再转换。")
         return
 
     choice = ActionChoiceDialog(
         self.root,
-        "目标降色格式",
-        "请选择要把当前 1888 素材降到哪个格式。",
-        [
-            ("0064", "降到 0064", True),
-            ("0065", "降到 0065", False),
-            ("cancel", "取消", False),
-        ],
+        "目标转换格式",
+        f"请选择要把当前 {current_format} 素材转换到哪个更低的格式。",
+        manual_format_conversion_actions_for(current_format),
     ).show()
     if choice in {None, "cancel"}:
         return
@@ -3897,7 +4111,7 @@ def _theme_studio_reduce_color_and_replace(self) -> None:
         return
 
     all_notes = reduction_notes + notes
-    self._append_log("log", f"已把当前 1888 素材手动降到 {target_format}。")
+    self._append_log("log", f"已把当前 1888 素材手动转换到 {target_format}。")
     self._append_replacement_notes_to_log(all_notes)
     self.notes_var.set("；".join(all_notes))
     self._refresh_assets()

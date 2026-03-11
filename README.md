@@ -26,10 +26,10 @@ This fork repositions the project as `iPod Theme Studio`: a friendlier desktop-o
 - Added a portable bundle workflow through `build_portable_bundle.bat`, so Windows users can ship a no-install folder with a bundled Python runtime
 - Added artwork preview improvements, Nano 7 quick grouping shortcuts, and basic capacity-risk reminders for assets promoted to `_1888`
 - Added built-in crop / resize flow for oversized images, with higher-quality downscaling for wallpaper replacement
-- Added manual reduction preview and strategy selection for turning `1888` artwork into `0064` or `0065`
-- Added a saved artwork library with search, notes, delete, import-from-computer, reuse-in-replacement, and manual `1888` reduction tools
+- Added manual color-conversion preview and strategy selection across `0004` / `0008` / `0064` / `0065` / `0565` / `1888` artwork workflows
+- Added a saved artwork library with search, notes, delete, import-from-computer, reuse-in-replacement, and manual color-conversion tools
 - Added batch import into the saved artwork library, with optional shared target size and per-image crop flow
-- Added direct format detection for saved assets, so imported images show an inferred format even when the filename does not contain an artwork suffix
+- Added direct format detection for saved assets, so imported images and manually converted library entries show an inferred format even when the filename does not contain an artwork suffix
 - Added an About page in the GUI with upstream attribution and GPL-3.0 notice
 - Improved Windows Python handling in `src/main.rs` so unpacking is more reliable when using a venv or conda environment
 - Documented the missing Python dependency `fs`
@@ -44,13 +44,13 @@ The current GUI is focused on artwork workflows:
 - Replace artwork with automatic size checks
 - Built-in crop / resize for large source images, so common wallpaper prep can be done inside the GUI
 - Auto-promote some palette-based assets to `_1888.png` when the replacement image exceeds the original color limit
-- Ask whether to keep `1888` or manually reduce back to `0064` / `0065` when replacing low-color targets
-- Preview reduction results with different strategies before committing
+- Keep the original low-color format automatically when a replacement already satisfies it, and only ask when promotion or manual conversion is actually needed
+- Preview manual color-conversion results with different strategies before committing
 - Save current artwork into a reusable local library
 - Import outside images into the saved library, either as-is or after cropping / resizing
 - Batch-import multiple outside images into the saved library, either directly or with one shared target size plus per-image cropping
 - Search the saved library by filename or note, edit notes, delete saved items, and reuse saved assets as replacement sources
-- Manually reduce saved-library `1888` assets to lower-color formats
+- Manually convert the current artwork or saved-library assets to lower-color formats
 - Repack a modified IPSW for flashing through iTunes / Apple Devices
 
 ### Portable bundle

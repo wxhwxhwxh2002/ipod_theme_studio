@@ -198,29 +198,28 @@ def _detect_saved_artwork_format(path: Path) -> str:
     except OSError:
         return ""
 
-    if any(pixel[3] != 255 for pixel in colors):
-        return "1888"
-
+    opaque_only = all(alpha == 255 for _red, _green, _blue, alpha in colors)
     rgb_colors = {(red, green, blue) for red, green, blue, _alpha in colors}
     grayscale = all(red == green == blue for red, green, blue in rgb_colors)
-    color_count = len(rgb_colors)
+    color_count = len(colors)
 
-    if grayscale:
+    if opaque_only and grayscale:
         if color_count <= 16:
             return "0004"
         if color_count <= 256:
             return "0008"
 
-    # Only classify as 0065 when the image is already constrained to RGB565-like
-    # channel steps. Generic truecolor photos should remain 1888 in the library.
+    if color_count <= 255:
+        return "0064"
+
     rgb565_like = all(
         red % 8 == 0 and green % 4 == 0 and blue % 8 == 0
         for red, green, blue in rgb_colors
     )
+    if opaque_only and rgb565_like:
+        return "0565"
 
-    if color_count <= 255:
-        return "0064"
-    if color_count <= 65536 and rgb565_like:
+    if color_count <= 65535:
         return "0065"
     return "1888"
 
