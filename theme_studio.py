@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - optional runtime acceleration
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
-from theme_studio_core import ThemeStudio, StudioError, WORK_INPUTS
+from theme_studio_core import APP_ROOT, ThemeStudio, StudioError, WORK_INPUTS
 
 
 BG = "#f4efe6"
@@ -32,6 +32,8 @@ PREVIEW_CANVAS_WIDTH = 360
 PREVIEW_CANVAS_HEIGHT = 320
 CROP_CANVAS_WIDTH = 520
 CROP_CANVAS_HEIGHT = 420
+APP_ICON_PNG = APP_ROOT / "studio_icon.png"
+APP_ICON_ICO = APP_ROOT / "studio_icon.ico"
 
 
 class CropResizeDialog:
@@ -1843,6 +1845,9 @@ class ThemeStudioApp:
         self.root.geometry("1380x860")
         self.root.minsize(1180, 760)
         self.root.configure(bg=BG)
+        self.app_icon_image: ImageTk.PhotoImage | None = None
+        self.header_icon_image: ImageTk.PhotoImage | None = None
+        self._load_app_icon()
 
         self.log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.preview_image: ImageTk.PhotoImage | None = None
@@ -1860,6 +1865,7 @@ class ThemeStudioApp:
 
         self._configure_style()
         self._build_layout()
+        self._apply_branding()
         self._load_existing_session()
         self._refresh_assets()
         self.root.after(120, self._drain_log_queue)
@@ -1877,6 +1883,52 @@ class ThemeStudioApp:
         style.configure("Treeview", font=("Consolas", 10), rowheight=26)
         style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10))
 
+    def _load_app_icon(self) -> None:
+        if APP_ICON_PNG.exists():
+            try:
+                with Image.open(APP_ICON_PNG) as image:
+                    header_icon = image.copy()
+                    header_icon.thumbnail((40, 40), Image.Resampling.LANCZOS)
+                    self.header_icon_image = ImageTk.PhotoImage(header_icon)
+
+                self.app_icon_image = tk.PhotoImage(file=str(APP_ICON_PNG))
+                self.root.iconphoto(True, self.app_icon_image)
+            except Exception:
+                self.app_icon_image = None
+                self.header_icon_image = None
+
+        if APP_ICON_ICO.exists():
+            try:
+                self.root.iconbitmap(str(APP_ICON_ICO))
+            except Exception:
+                pass
+
+    def _apply_branding(self) -> None:
+        outer = self.root.winfo_children()[0] if self.root.winfo_children() else None
+        if outer is None:
+            return
+
+        top = outer.winfo_children()[0] if outer.winfo_children() else None
+        if top is None:
+            return
+
+        title_label = None
+        subtitle_label = None
+        for child in top.winfo_children():
+            if isinstance(child, ttk.Label) and child.cget("text") == "iPod Theme Studio":
+                title_label = child
+            elif isinstance(child, tk.Label):
+                subtitle_label = child
+
+        if subtitle_label is not None:
+            subtitle_label.configure(text="定制属于你自己的 iPod nano 6/7")
+
+        if title_label is not None and self.header_icon_image is not None:
+            existing_icon = getattr(self, "_header_icon_label", None)
+            if existing_icon is None or not existing_icon.winfo_exists():
+                self._header_icon_label = tk.Label(top, image=self.header_icon_image, bg=BG)
+                self._header_icon_label.pack(side="left", padx=(0, 10), before=title_label)
+
     def _build_layout(self) -> None:
         outer = ttk.Frame(self.root, padding=18)
         outer.pack(fill="both", expand=True)
@@ -1884,7 +1936,13 @@ class ThemeStudioApp:
         top = ttk.Frame(outer)
         top.pack(fill="x")
 
-        title = ttk.Label(top, text="iPod Theme Studio", style="Title.TLabel")
+        title_row = ttk.Frame(top)
+        title_row.pack(side="left")
+
+        if self.header_icon_image is not None:
+            tk.Label(title_row, image=self.header_icon_image, bg=BG).pack(side="left", padx=(0, 10))
+
+        title = ttk.Label(title_row, text="iPod Theme Studio", style="Title.TLabel")
         title.pack(side="left")
 
         subtitle = tk.Label(
@@ -3733,12 +3791,100 @@ def _theme_studio_reduce_color_and_replace(self) -> None:
         self._on_asset_selected()
 
 
+def _theme_studio_show_about(self) -> None:
+    dialog = tk.Toplevel(self.root)
+    dialog.title("关于与版权")
+    dialog.geometry("700x500")
+    dialog.configure(bg=BG)
+    dialog.transient(self.root)
+    dialog.grab_set()
+
+    container = tk.Frame(dialog, bg=CARD, padx=22, pady=22)
+    container.pack(fill="both", expand=True, padx=16, pady=16)
+
+    tk.Label(
+        container,
+        text="关于 iPod Theme Studio",
+        bg=CARD,
+        fg=TEXT,
+        font=("Segoe UI Semibold", 18),
+    ).pack(anchor="w")
+
+    body_text = (
+        "iPod Theme Studio 是基于上游项目 ipod_theme 构建的图形界面版本，"
+        "用于更方便地浏览、替换和重新打包 iPod nano 固件中的美术资源。\n\n"
+        "当前项目地址：\n"
+        "https://github.com/wxhwxhwxh2002/ipod_theme_studio\n\n"
+        "上游项目地址：\n"
+        "https://github.com/nfzerox/ipod_theme\n\n"
+        "上游作者：nfzerox，以及 README 中列出的相关贡献者与上游项目作者。\n\n"
+        "许可证：GPL-3.0\n"
+        "本项目基于 GPL-3.0 项目继续修改和分发，因此同样遵守 GPL-3.0。"
+    )
+
+    tk.Label(
+        container,
+        text=body_text,
+        bg=CARD,
+        fg=TEXT,
+        justify="left",
+        wraplength=640,
+        font=("Segoe UI", 10),
+    ).pack(anchor="w", pady=(14, 18))
+
+    button_row = tk.Frame(container, bg=CARD)
+    button_row.pack(fill="x")
+
+    tk.Button(
+        button_row,
+        text="打开本项目主页",
+        command=lambda: webbrowser.open("https://github.com/wxhwxhwxh2002/ipod_theme_studio"),
+        bg=ACCENT,
+        fg="white",
+        activebackground="#173b37",
+        activeforeground="white",
+        relief="flat",
+        padx=14,
+        pady=8,
+        font=("Segoe UI Semibold", 10),
+    ).pack(side="left")
+
+    tk.Button(
+        button_row,
+        text="打开上游项目",
+        command=lambda: webbrowser.open("https://github.com/nfzerox/ipod_theme"),
+        bg="#ebe1cf",
+        fg=TEXT,
+        activebackground="#dfd0b5",
+        activeforeground=TEXT,
+        relief="flat",
+        padx=14,
+        pady=8,
+        font=("Segoe UI Semibold", 10),
+    ).pack(side="left", padx=(10, 0))
+
+    tk.Button(
+        button_row,
+        text="关闭",
+        command=dialog.destroy,
+        bg="#ebe1cf",
+        fg=TEXT,
+        activebackground="#dfd0b5",
+        activeforeground=TEXT,
+        relief="flat",
+        padx=14,
+        pady=8,
+        font=("Segoe UI Semibold", 10),
+    ).pack(side="right")
+
+
 SavedAssetBrowserDialog._delete_selected = _saved_asset_browser_delete_selected
 ThemeStudioApp._prepare_replacement_candidate = _theme_studio_prepare_replacement_candidate
 ThemeStudioApp._choose_replacement_candidate = _theme_studio_choose_replacement_candidate
 ThemeStudioApp._import_file_to_saved_assets = _theme_studio_import_file_to_saved_assets
 ThemeStudioApp._reduce_saved_library_asset = _theme_studio_reduce_saved_library_asset
 ThemeStudioApp._reduce_color_and_replace = _theme_studio_reduce_color_and_replace
+ThemeStudioApp._show_about = _theme_studio_show_about
 
 
 def main() -> None:
