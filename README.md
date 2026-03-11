@@ -2,6 +2,8 @@
 
 A GUI-focused fork of [nfzerox/ipod_theme](https://github.com/nfzerox/ipod_theme) for editing and repacking iPod nano themes with a more approachable desktop workflow.
 
+简体中文说明: [README.zh-CN.md](README.zh-CN.md)
+
 This project still builds on the original `ipod_theme` work, which itself is based on [ipod_sun](https://github.com/CUB3D/ipod_sun), [ipodhax](https://github.com/760ceb3b9c0ba4872cadf3ce35a7a494/ipodhax), and [silverutil](https://github.com/spotlightishere/silverutil).
 
 Be sure to check out community forks and projects with additional features. [asset replacer](https://assetreplacer.zeehondie.net/) lets you create themes with a graphical interface right from your browser. And thanks to [TGRgitx](https://github.com/TGRgitx)'s generous contributions, this repo now includes enhancements from [ipod_theme_max_features](https://github.com/TISgitx/ipod_theme_max_features), which adds support for customizing sounds, modifying localization text for additional languages, and untethered boot for iPod nano 7th generation so you don't have to manually restart from disk mode.
@@ -22,6 +24,10 @@ This fork repositions the project as `iPod Theme Studio`: a friendlier desktop-o
 - Added `theme_studio_core.py`, which wraps the unpack/replace/repack workflow for official firmware and community IPSW files
 - Added Windows-friendly launch/build helpers: `run_theme_studio.bat` and `build_theme_studio_exe.bat`
 - Added artwork preview improvements, Nano 7 quick grouping shortcuts, and basic capacity-risk reminders for assets promoted to `_1888`
+- Added built-in crop / resize flow for oversized images, with higher-quality downscaling for wallpaper replacement
+- Added manual reduction preview and strategy selection for turning `1888` artwork into `0064` or `0065`
+- Added a saved artwork library with search, notes, delete, import-from-computer, reuse-in-replacement, and manual `1888` reduction tools
+- Added direct format detection for saved assets, so imported images show an inferred format even when the filename does not contain an artwork suffix
 - Added an About page in the GUI with upstream attribution and GPL-3.0 notice
 - Improved Windows Python handling in `src/main.rs` so unpacking is more reliable when using a venv or conda environment
 - Documented the missing Python dependency `fs`
@@ -34,7 +40,14 @@ The current GUI is focused on artwork workflows:
 - Import official firmware or a community IPSW
 - Unpack and preview artwork
 - Replace artwork with automatic size checks
+- Built-in crop / resize for large source images, so common wallpaper prep can be done inside the GUI
 - Auto-promote some palette-based assets to `_1888.png` when the replacement image exceeds the original color limit
+- Ask whether to keep `1888` or manually reduce back to `0064` / `0065` when replacing low-color targets
+- Preview reduction results with different strategies before committing
+- Save current artwork into a reusable local library
+- Import outside images into the saved library, either as-is or after cropping / resizing
+- Search the saved library by filename or note, edit notes, delete saved items, and reuse saved assets as replacement sources
+- Manually reduce saved-library `1888` assets to lower-color formats
 - Repack a modified IPSW for flashing through iTunes / Apple Devices
 
 The original CLI tutorial below is still the authoritative upstream workflow and remains available as-is.
@@ -105,12 +118,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 For MacOS and Linux:
 
 ```shell
-export PIP_BREAK_SYSTEM_PACKAGES=1 && pip3 install fs pyfatfs fonttools pillow
+export PIP_BREAK_SYSTEM_PACKAGES=1 && pip3 install fs pyfatfs fonttools pillow numpy opencv-python-headless
 ```
 
 For Windows, execute and close terminal:
 ```shell
-pip3 install fs pyfatfs fonttools pillow
+pip3 install fs pyfatfs fonttools pillow numpy opencv-python-headless
 ```
 
 #### 1) Download and unpack iPod firmware:

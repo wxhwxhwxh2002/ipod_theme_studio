@@ -5,13 +5,21 @@ import os
 import queue
 import subprocess
 import threading
+import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 import webbrowser
 
-from PIL import Image, ImageTk
+try:
+    import cv2
+    import numpy as np
+except ImportError:  # pragma: no cover - optional runtime acceleration
+    cv2 = None
+    np = None
 
-from theme_studio_core import ThemeStudio, StudioError
+from PIL import Image, ImageDraw, ImageFilter, ImageTk
+
+from theme_studio_core import ThemeStudio, StudioError, WORK_INPUTS
 
 
 BG = "#f4efe6"
@@ -22,6 +30,1809 @@ TEXT = "#1d2b28"
 MUTED = "#61706d"
 PREVIEW_CANVAS_WIDTH = 360
 PREVIEW_CANVAS_HEIGHT = 320
+CROP_CANVAS_WIDTH = 520
+CROP_CANVAS_HEIGHT = 420
+
+
+class CropResizeDialog:
+    def __init__(self, parent: tk.Tk, source_path: Path, target_name: str, target_size: tuple[int, int]) -> None:
+        self.parent = parent
+        self.source_path = source_path
+        self.target_name = target_name
+        self.target_size = target_size
+        with Image.open(source_path) as image:
+            self.source_image = image.convert("RGBA")
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("裁剪并缩放")
+        self.dialog.geometry("760x720")
+        self.dialog.minsize(680, 640)
+        self.dialog.configure(bg=BG)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self.preview_image: ImageTk.PhotoImage | None = None
+        self.result_path: Path | None = None
+        self.drag_start: tuple[int, int] | None = None
+        self.base_scale = 1.0
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        self.crop_frame = (0.0, 0.0, 0.0, 0.0)
+
+        self.zoom_var = tk.DoubleVar(value=1.0)
+        self.zoom_label_var = tk.StringVar(value="缩放 100%")
+
+        self._build_layout()
+        self._update_crop_frame()
+        self._render()
+
+    def _build_layout(self) -> None:
+        container = tk.Frame(self.dialog, bg=CARD, padx=18, pady=18)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+        container.grid_rowconfigure(3, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
+        container.columnconfigure(0, weight=1)
+
+        tk.Label(
+            container,
+            text="裁剪并缩放到目标分辨率",
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 17),
+        ).grid(row=0, column=0, sticky="w")
+
+        self.preview_canvas = tk.Canvas(
+            container,
+            width=CROP_CANVAS_WIDTH,
+            height=CROP_CANVAS_HEIGHT,
+            bg="#10211f",
+            highlightthickness=0,
+            relief="flat",
+        )
+        self.preview_canvas.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+        self.preview_canvas.bind("<ButtonPress-1>", self._on_drag_start)
+        self.preview_canvas.bind("<B1-Motion>", self._on_drag)
+        self.preview_canvas.bind("<ButtonRelease-1>", self._on_drag_end)
+        self.preview_canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+        self.preview_canvas.bind("<Configure>", self._on_canvas_resize)
+
+        tk.Label(
+            container,
+            text=(
+                f"目标素材：{self.target_name}\n"
+                f"目标分辨率：{self.target_size[0]}x{self.target_size[1]}\n"
+                "拖动图片调整取景，滚轮或滑块控制缩放。半透明框内的内容会被输出成可直接替换的 PNG。"
+            ),
+            bg=CARD,
+            fg=TEXT,
+            justify="left",
+            wraplength=700,
+            font=("Segoe UI", 10),
+        ).grid(row=2, column=0, sticky="ew", pady=(14, 0))
+
+        controls = tk.Frame(container, bg=CARD)
+        controls.grid(row=3, column=0, sticky="ew", pady=(16, 0))
+        controls.columnconfigure(1, weight=1)
+
+        tk.Label(
+            controls,
+            textvariable=self.zoom_label_var,
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 10),
+        ).grid(row=0, column=0, sticky="w", padx=(0, 12))
+
+        zoom_scale = tk.Scale(
+            controls,
+            from_=1.0,
+            to=6.0,
+            resolution=0.05,
+            orient="horizontal",
+            variable=self.zoom_var,
+            command=self._on_zoom_changed,
+            bg=CARD,
+            fg=TEXT,
+            highlightthickness=0,
+            troughcolor="#d7e7df",
+            activebackground=ACCENT,
+        )
+        zoom_scale.grid(row=0, column=1, sticky="ew")
+
+        buttons = tk.Frame(container, bg=CARD)
+        buttons.grid(row=4, column=0, sticky="ew", pady=(18, 0))
+
+        tk.Button(
+            buttons,
+            text="重置取景",
+            command=self._reset_view,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left")
+
+        tk.Button(
+            buttons,
+            text="取消",
+            command=self._cancel,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="right")
+
+        tk.Button(
+            buttons,
+            text="生成替换图",
+            command=self._confirm,
+            bg=ACCENT,
+            fg="white",
+            activebackground="#173b37",
+            activeforeground="white",
+            relief="flat",
+            padx=16,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="right", padx=(0, 10))
+
+    def show(self) -> Path | None:
+        self.dialog.wait_window()
+        return self.result_path
+
+    def _display_scale(self) -> float:
+        return self.base_scale * self.zoom_var.get()
+
+    def _update_crop_frame(self) -> None:
+        canvas_width = max(self.preview_canvas.winfo_width(), CROP_CANVAS_WIDTH)
+        canvas_height = max(self.preview_canvas.winfo_height(), CROP_CANVAS_HEIGHT)
+        target_width, target_height = self.target_size
+
+        max_width = canvas_width - 48
+        max_height = canvas_height - 48
+        fit = min(max_width / target_width, max_height / target_height)
+        crop_width = max(120.0, target_width * fit)
+        crop_height = max(120.0, target_height * fit)
+
+        left = (canvas_width - crop_width) / 2
+        top = (canvas_height - crop_height) / 2
+        self.crop_frame = (left, top, left + crop_width, top + crop_height)
+        self.base_scale = max(crop_width / self.source_image.width, crop_height / self.source_image.height)
+        self._clamp_offsets()
+
+    def _render(self) -> None:
+        canvas_width = max(self.preview_canvas.winfo_width(), CROP_CANVAS_WIDTH)
+        canvas_height = max(self.preview_canvas.winfo_height(), CROP_CANVAS_HEIGHT)
+        left, top, right, bottom = self.crop_frame
+        crop_width = right - left
+        crop_height = bottom - top
+        scale = self._display_scale()
+
+        render_width = max(1, int(round(self.source_image.width * scale)))
+        render_height = max(1, int(round(self.source_image.height * scale)))
+        image_center_x = canvas_width / 2 + self.offset_x
+        image_center_y = canvas_height / 2 + self.offset_y
+        image_left = int(round(image_center_x - render_width / 2))
+        image_top = int(round(image_center_y - render_height / 2))
+
+        composed = Image.new("RGBA", (canvas_width, canvas_height), "#10211f")
+        preview = self.source_image.resize((render_width, render_height), Image.Resampling.LANCZOS)
+        composed.alpha_composite(preview, (image_left, image_top))
+
+        overlay = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        shade = (0, 0, 0, 155)
+        draw.rectangle((0, 0, canvas_width, top), fill=shade)
+        draw.rectangle((0, bottom, canvas_width, canvas_height), fill=shade)
+        draw.rectangle((0, top, left, bottom), fill=shade)
+        draw.rectangle((right, top, canvas_width, bottom), fill=shade)
+        draw.rectangle((left, top, right, bottom), outline=(255, 255, 255, 235), width=3)
+        draw.text((left + 12, top + 12), f"{self.target_size[0]}x{self.target_size[1]}", fill=(255, 255, 255, 220))
+        composed = Image.alpha_composite(composed, overlay)
+
+        self.preview_image = ImageTk.PhotoImage(composed)
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_image(0, 0, image=self.preview_image, anchor="nw")
+        self.preview_canvas.create_text(
+            canvas_width / 2,
+            canvas_height - 14,
+            text="拖动图片调整位置，滚轮可缩放",
+            fill="#d7ebe4",
+            font=("Segoe UI", 10),
+        )
+
+        zoom_percent = int(round(self.zoom_var.get() * 100))
+        self.zoom_label_var.set(f"缩放 {zoom_percent}%")
+
+    def _clamp_offsets(self) -> None:
+        left, top, right, bottom = self.crop_frame
+        crop_width = right - left
+        crop_height = bottom - top
+        render_width = self.source_image.width * self._display_scale()
+        render_height = self.source_image.height * self._display_scale()
+        max_offset_x = max(0.0, (render_width - crop_width) / 2)
+        max_offset_y = max(0.0, (render_height - crop_height) / 2)
+        self.offset_x = min(max(self.offset_x, -max_offset_x), max_offset_x)
+        self.offset_y = min(max(self.offset_y, -max_offset_y), max_offset_y)
+
+    def _reset_view(self) -> None:
+        self.zoom_var.set(1.0)
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        self._update_crop_frame()
+        self._render()
+
+    def _on_zoom_changed(self, _value=None) -> None:
+        self._clamp_offsets()
+        self._render()
+
+    def _on_mouse_wheel(self, event) -> None:
+        delta = 0.1 if event.delta > 0 else -0.1
+        next_zoom = min(6.0, max(1.0, self.zoom_var.get() + delta))
+        self.zoom_var.set(next_zoom)
+        self._on_zoom_changed()
+
+    def _on_drag_start(self, event) -> None:
+        self.drag_start = (event.x, event.y)
+
+    def _on_drag(self, event) -> None:
+        if self.drag_start is None:
+            self.drag_start = (event.x, event.y)
+            return
+
+        last_x, last_y = self.drag_start
+        self.offset_x += event.x - last_x
+        self.offset_y += event.y - last_y
+        self.drag_start = (event.x, event.y)
+        self._clamp_offsets()
+        self._render()
+
+    def _on_drag_end(self, _event=None) -> None:
+        self.drag_start = None
+
+    def _on_canvas_resize(self, _event=None) -> None:
+        self._update_crop_frame()
+        self._render()
+
+    def _confirm(self) -> None:
+        try:
+            self.result_path = self._export_image()
+        except Exception as exc:  # pragma: no cover - modal fallback
+            messagebox.showerror("裁剪失败", str(exc), parent=self.dialog)
+            return
+        self.dialog.destroy()
+
+    def _cancel(self) -> None:
+        self.result_path = None
+        self.dialog.destroy()
+
+    def _high_quality_resize(self, image: Image.Image, target_size: tuple[int, int]) -> Image.Image:
+        if cv2 is not None and np is not None:
+            rgba = np.array(image.convert("RGBA"))
+            bgra = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
+            interpolation = cv2.INTER_AREA
+            if image.width < target_size[0] or image.height < target_size[1]:
+                interpolation = cv2.INTER_LANCZOS4
+            resized = cv2.resize(bgra, target_size, interpolation=interpolation)
+            rgba_resized = cv2.cvtColor(resized, cv2.COLOR_BGRA2RGBA)
+            result = Image.fromarray(rgba_resized, "RGBA")
+            if image.width / target_size[0] >= 2 or image.height / target_size[1] >= 2:
+                result = result.filter(ImageFilter.UnsharpMask(radius=0.4, percent=85, threshold=2))
+            return result
+
+        resized = image
+        target_width, target_height = target_size
+
+        # Downsample in stages to preserve more detail than a single large shrink.
+        while resized.width // 2 >= target_width and resized.height // 2 >= target_height:
+            next_width = max(target_width, resized.width // 2)
+            next_height = max(target_height, resized.height // 2)
+            resized = resized.resize((next_width, next_height), Image.Resampling.BOX)
+
+        resized = resized.resize(target_size, Image.Resampling.LANCZOS)
+
+        if image.width / target_width >= 2 or image.height / target_height >= 2:
+            resized = resized.filter(ImageFilter.UnsharpMask(radius=0.6, percent=115, threshold=2))
+        return resized
+
+    def _export_image(self) -> Path:
+        left, top, right, bottom = self.crop_frame
+        crop_width = right - left
+        crop_height = bottom - top
+        scale = self._display_scale()
+
+        source_crop_width = crop_width / scale
+        source_crop_height = crop_height / scale
+        source_center_x = self.source_image.width / 2 - self.offset_x / scale
+        source_center_y = self.source_image.height / 2 - self.offset_y / scale
+        source_left = source_center_x - source_crop_width / 2
+        source_top = source_center_y - source_crop_height / 2
+        source_right = source_left + source_crop_width
+        source_bottom = source_top + source_crop_height
+
+        working_size = (
+            max(self.target_size[0], int(round(source_crop_width))),
+            max(self.target_size[1], int(round(source_crop_height))),
+        )
+        cropped = self.source_image.transform(
+            working_size,
+            Image.Transform.EXTENT,
+            (source_left, source_top, source_right, source_bottom),
+            resample=Image.Resampling.BICUBIC,
+        )
+        rendered = self._high_quality_resize(cropped, self.target_size)
+
+        WORK_INPUTS.mkdir(parents=True, exist_ok=True)
+        target_stem = Path(self.target_name).stem
+        timestamp = time.strftime("%Y%m%d%H%M%S")
+        output_path = WORK_INPUTS / f"{target_stem}_crop_{timestamp}.png"
+        rendered.save(output_path, "PNG")
+        return output_path
+
+
+class SizeInputDialog:
+    def __init__(self, parent: tk.Tk, initial_size: tuple[int, int] | None = None) -> None:
+        self.result: tuple[int, int] | None = None
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("目标分辨率")
+        self.dialog.geometry("360x210")
+        self.dialog.minsize(320, 190)
+        self.dialog.configure(bg=BG)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        width_value = str(initial_size[0]) if initial_size else ""
+        height_value = str(initial_size[1]) if initial_size else ""
+        self.width_var = tk.StringVar(value=width_value)
+        self.height_var = tk.StringVar(value=height_value)
+
+        container = tk.Frame(self.dialog, bg=CARD, padx=18, pady=18)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+        container.columnconfigure(1, weight=1)
+
+        tk.Label(
+            container,
+            text="输入目标分辨率",
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 15),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        tk.Label(
+            container,
+            text="宽",
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 10),
+        ).grid(row=1, column=0, sticky="w", pady=(18, 8), padx=(0, 10))
+        tk.Entry(
+            container,
+            textvariable=self.width_var,
+            relief="flat",
+            bg="#f7f1e7",
+            fg=TEXT,
+            insertbackground=TEXT,
+            font=("Segoe UI", 11),
+        ).grid(row=1, column=1, sticky="ew", pady=(18, 8))
+
+        tk.Label(
+            container,
+            text="高",
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 10),
+        ).grid(row=2, column=0, sticky="w", pady=(0, 8), padx=(0, 10))
+        tk.Entry(
+            container,
+            textvariable=self.height_var,
+            relief="flat",
+            bg="#f7f1e7",
+            fg=TEXT,
+            insertbackground=TEXT,
+            font=("Segoe UI", 11),
+        ).grid(row=2, column=1, sticky="ew", pady=(0, 8))
+
+        buttons = tk.Frame(container, bg=CARD)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+
+        tk.Button(
+            buttons,
+            text="取消",
+            command=self.dialog.destroy,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=8,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="right")
+
+        tk.Button(
+            buttons,
+            text="确定",
+            command=self._confirm,
+            bg=ACCENT,
+            fg="white",
+            activebackground="#173b37",
+            activeforeground="white",
+            relief="flat",
+            padx=14,
+            pady=8,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="right", padx=(0, 10))
+
+    def show(self) -> tuple[int, int] | None:
+        self.dialog.wait_window()
+        return self.result
+
+    def _confirm(self) -> None:
+        width_text = self.width_var.get().strip()
+        height_text = self.height_var.get().strip()
+        if not width_text.isdigit() or not height_text.isdigit():
+            messagebox.showerror("格式不正确", "宽和高都必须是正整数。", parent=self.dialog)
+            return
+
+        width = int(width_text)
+        height = int(height_text)
+        if width <= 0 or height <= 0:
+            messagebox.showerror("格式不正确", "宽和高都必须大于 0。", parent=self.dialog)
+            return
+
+        self.result = (width, height)
+        self.dialog.destroy()
+
+
+class ActionChoiceDialog:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        title: str,
+        message: str,
+        actions: list[tuple[str, str, bool]],
+    ) -> None:
+        self.result: str | None = None
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(title)
+        self.dialog.geometry("440x240")
+        self.dialog.minsize(380, 220)
+        self.dialog.configure(bg=BG)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        container = tk.Frame(self.dialog, bg=CARD, padx=18, pady=18)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+        container.columnconfigure(0, weight=1)
+
+        tk.Label(
+            container,
+            text=title,
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 15),
+        ).grid(row=0, column=0, sticky="w")
+
+        tk.Label(
+            container,
+            text=message,
+            bg=CARD,
+            fg=TEXT,
+            justify="left",
+            wraplength=380,
+            font=("Segoe UI", 10),
+        ).grid(row=1, column=0, sticky="w", pady=(12, 0))
+
+        button_row = tk.Frame(container, bg=CARD)
+        button_row.grid(row=2, column=0, sticky="ew", pady=(18, 0))
+
+        for index, (value, label, primary) in enumerate(actions):
+            tk.Button(
+                button_row,
+                text=label,
+                command=lambda selected=value: self._choose(selected),
+                bg=ACCENT if primary else "#ebe1cf",
+                fg="white" if primary else TEXT,
+                activebackground="#173b37" if primary else "#dfd0b5",
+                activeforeground="white" if primary else TEXT,
+                relief="flat",
+                padx=14,
+                pady=9,
+                font=("Segoe UI Semibold", 10),
+            ).pack(side="left", padx=(0 if index == 0 else 10, 0))
+
+    def show(self) -> str | None:
+        self.dialog.wait_window()
+        return self.result
+
+    def _choose(self, value: str | None) -> None:
+        self.result = value
+        self.dialog.destroy()
+
+
+class ReductionPreviewDialog:
+    def __init__(
+        self,
+        parent: tk.Tk,
+        source_path: Path,
+        target_format: str,
+        render_fn,
+        allow_keep_original: bool,
+        title: str,
+    ) -> None:
+        self.target_format = target_format
+        self.render_fn = render_fn
+        self.allow_keep_original = allow_keep_original
+        self.action = "cancel"
+        self.result_path: Path | None = None
+        self.strategy_var = tk.StringVar(value="平滑")
+        self.original_preview: ImageTk.PhotoImage | None = None
+        self.reduced_preview: ImageTk.PhotoImage | None = None
+        self.reduced_image: Image.Image | None = None
+
+        with Image.open(source_path) as image:
+            self.source_image = image.convert("RGBA")
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(title)
+        self.dialog.geometry("1020x840")
+        self.dialog.minsize(960, 780)
+        self.dialog.configure(bg=BG)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self._build_layout()
+        self._render_preview()
+
+    def _build_layout(self) -> None:
+        container = tk.Frame(self.dialog, bg=CARD, padx=18, pady=18)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+        container.grid_rowconfigure(3, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        tk.Label(
+            container,
+            text=f"降色预览：目标格式 {self.target_format}",
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 17),
+        ).grid(row=0, column=0, sticky="w")
+
+        description = (
+            "推荐先保持 1888，只在你确认需要控体积或保留原低色格式时再降色。"
+            if self.allow_keep_original
+            else "当前素材已经是 1888，这里可以手动尝试降到 0064 或 0065。"
+        )
+        tk.Label(
+            container,
+            text=description,
+            bg=CARD,
+            fg=MUTED,
+            justify="left",
+            wraplength=820,
+            font=("Segoe UI", 10),
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+
+        strategy_row = tk.Frame(container, bg=CARD)
+        strategy_row.grid(row=2, column=0, sticky="ew", pady=(16, 0))
+        tk.Label(
+            strategy_row,
+            text="降色策略",
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left")
+        strategy_box = ttk.Combobox(
+            strategy_row,
+            textvariable=self.strategy_var,
+            state="readonly",
+            values=["保守", "平滑", "锐利"],
+            width=12,
+        )
+        strategy_box.pack(side="left", padx=(10, 0))
+        strategy_box.bind("<<ComboboxSelected>>", self._render_preview)
+
+        tk.Label(
+            strategy_row,
+            text="保守：更少处理  平滑：默认推荐  锐利：边缘更硬",
+            bg=CARD,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(12, 0))
+
+        preview_row = tk.Frame(container, bg=CARD)
+        preview_row.grid(row=3, column=0, sticky="nsew", pady=(18, 0))
+        preview_row.grid_columnconfigure(0, weight=1)
+        preview_row.grid_columnconfigure(1, weight=1)
+        preview_row.grid_rowconfigure(0, weight=1)
+
+        original_card = tk.Frame(preview_row, bg="#f7f1e7", padx=12, pady=12)
+        original_card.grid(row=0, column=0, sticky="nsew")
+        tk.Label(original_card, text="原图预览", bg="#f7f1e7", fg=TEXT, font=("Segoe UI Semibold", 10)).pack(anchor="w")
+        self.original_canvas = tk.Canvas(original_card, width=360, height=360, bg=ACCENT_LIGHT, highlightthickness=0)
+        self.original_canvas.pack(fill="both", expand=True, pady=(10, 0))
+
+        reduced_card = tk.Frame(preview_row, bg="#f7f1e7", padx=12, pady=12)
+        reduced_card.grid(row=0, column=1, sticky="nsew", padx=(16, 0))
+        tk.Label(
+            reduced_card,
+            text="降色预览",
+            bg="#f7f1e7",
+            fg=TEXT,
+            font=("Segoe UI Semibold", 10),
+        ).pack(anchor="w")
+        self.reduced_canvas = tk.Canvas(reduced_card, width=360, height=360, bg=ACCENT_LIGHT, highlightthickness=0)
+        self.reduced_canvas.pack(fill="both", expand=True, pady=(10, 0))
+
+        self.summary_label = tk.Label(
+            container,
+            text="",
+            bg=CARD,
+            fg=TEXT,
+            justify="left",
+            wraplength=820,
+            font=("Segoe UI", 10),
+        )
+        self.summary_label.grid(row=4, column=0, sticky="w", pady=(14, 0))
+
+        buttons = tk.Frame(container, bg=CARD)
+        buttons.grid(row=5, column=0, sticky="ew", pady=(18, 0))
+
+        tk.Button(
+            buttons,
+            text="取消",
+            command=self.dialog.destroy,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="right")
+
+        tk.Button(
+            buttons,
+            text="应用当前降色",
+            command=self._apply_reduced,
+            bg=ACCENT,
+            fg="white",
+            activebackground="#173b37",
+            activeforeground="white",
+            relief="flat",
+            padx=16,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="right", padx=(0, 10))
+
+        if self.allow_keep_original:
+            tk.Button(
+                buttons,
+                text="保持 1888（推荐）",
+                command=self._keep_original,
+                bg="#ebe1cf",
+                fg=TEXT,
+                activebackground="#dfd0b5",
+                activeforeground=TEXT,
+                relief="flat",
+                padx=14,
+                pady=9,
+                font=("Segoe UI Semibold", 10),
+            ).pack(side="left")
+
+    def show(self) -> tuple[str, str]:
+        self.dialog.wait_window()
+        return self.action, self.strategy_var.get()
+
+    def _render_preview(self, _event=None) -> None:
+        strategy = self.strategy_var.get()
+        self.reduced_image = self.render_fn(self.source_image.copy(), self.target_format, strategy)
+
+        self.original_preview = ImageTk.PhotoImage(self._thumbnail(self.source_image))
+        self.reduced_preview = ImageTk.PhotoImage(self._thumbnail(self.reduced_image))
+
+        self.original_canvas.delete("all")
+        self.original_canvas.create_image(180, 180, image=self.original_preview, anchor="center")
+        self.reduced_canvas.delete("all")
+        self.reduced_canvas.create_image(180, 180, image=self.reduced_preview, anchor="center")
+
+        reduced_colors = len(set(self.reduced_image.convert("RGBA").getdata()))
+        self.summary_label.configure(
+            text=f"当前策略：{strategy}。预览图颜色数约为 {reduced_colors}，可先看效果再决定是否应用。"
+        )
+
+    def _thumbnail(self, image: Image.Image) -> Image.Image:
+        preview = image.copy()
+        preview.thumbnail((320, 320), Image.Resampling.LANCZOS)
+        return preview
+
+    def _apply_reduced(self) -> None:
+        self.action = "reduced"
+        self.dialog.destroy()
+
+    def _keep_original(self) -> None:
+        self.action = "keep"
+        self.dialog.destroy()
+
+
+class SavedAssetBrowserDialog:
+    def __init__(self, parent: tk.Tk, studio: ThemeStudio, pick_mode: bool = False) -> None:
+        self.parent = parent
+        self.studio = studio
+        self.pick_mode = pick_mode
+        self.result_path: Path | None = None
+        self.preview_image: ImageTk.PhotoImage | None = None
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("已保存素材")
+        self.dialog.geometry("920x620")
+        self.dialog.minsize(820, 520)
+        self.dialog.configure(bg=BG)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self._build_layout()
+        self._normalize_saved_button_labels()
+        self._load_items()
+
+    def _build_layout(self) -> None:
+        container = tk.Frame(self.dialog, bg=CARD, padx=18, pady=18)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+        container.rowconfigure(1, weight=1)
+        container.columnconfigure(0, weight=1)
+        container.columnconfigure(1, weight=0)
+
+        title = "从收藏素材中选择" if self.pick_mode else "已保存素材库"
+        tk.Label(
+            container,
+            text=title,
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 17),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        list_card = tk.Frame(container, bg=CARD)
+        list_card.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+        list_card.rowconfigure(0, weight=1)
+        list_card.columnconfigure(0, weight=1)
+
+        columns = ("id", "format", "size", "saved_at", "name")
+        self.saved_tree = ttk.Treeview(list_card, columns=columns, show="headings", selectmode="extended")
+        self.saved_tree.heading("id", text="ID")
+        self.saved_tree.heading("format", text="格式")
+        self.saved_tree.heading("size", text="尺寸")
+        self.saved_tree.heading("saved_at", text="保存时间")
+        self.saved_tree.heading("name", text="文件名")
+        self.saved_tree.column("id", width=100, anchor="w")
+        self.saved_tree.column("format", width=90, anchor="center")
+        self.saved_tree.column("size", width=90, anchor="center")
+        self.saved_tree.column("saved_at", width=130, anchor="center")
+        self.saved_tree.column("name", width=260, anchor="w")
+        self.saved_tree.grid(row=0, column=0, sticky="nsew")
+        self.saved_tree.bind("<<TreeviewSelect>>", self._on_item_selected)
+        self.saved_tree.bind("<Double-1>", self._on_double_click)
+
+        scrollbar = ttk.Scrollbar(list_card, orient="vertical", command=self.saved_tree.yview)
+        self.saved_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        preview_card = tk.Frame(container, bg="#f7f1e7", padx=14, pady=14)
+        preview_card.grid(row=1, column=1, sticky="ns", padx=(16, 0), pady=(14, 0))
+
+        self.saved_preview_canvas = tk.Canvas(
+            preview_card,
+            width=300,
+            height=300,
+            bg=ACCENT_LIGHT,
+            highlightthickness=0,
+            relief="flat",
+        )
+        self.saved_preview_canvas.pack()
+        self.saved_preview_placeholder = self.saved_preview_canvas.create_text(
+            150,
+            150,
+            text="暂无预览",
+            fill=MUTED,
+            font=("Segoe UI", 11),
+        )
+
+        self.saved_meta_label = tk.Label(
+            preview_card,
+            text="",
+            bg="#f7f1e7",
+            fg=TEXT,
+            justify="left",
+            anchor="w",
+            wraplength=300,
+            font=("Consolas", 10),
+        )
+        self.saved_meta_label.pack(fill="x", pady=(12, 0))
+
+        self.saved_hint_label = tk.Label(
+            preview_card,
+            text="先在左侧选一张收藏素材。",
+            bg="#f7f1e7",
+            fg=MUTED,
+            justify="left",
+            wraplength=300,
+            font=("Segoe UI", 10),
+        )
+        self.saved_hint_label.pack(fill="x", pady=(10, 0))
+
+        buttons = tk.Frame(container, bg=CARD)
+        buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+
+        tk.Button(
+            buttons,
+            text="打开收藏目录",
+            command=self._open_saved_dir,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left")
+
+        tk.Button(
+            buttons,
+            text="刷新列表",
+            command=self._load_items,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            buttons,
+            text="关闭",
+            command=self.dialog.destroy,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="right")
+
+        if self.pick_mode:
+            tk.Button(
+                buttons,
+                text="使用这张素材",
+                command=self._confirm_pick,
+                bg=ACCENT,
+                fg="white",
+                activebackground="#173b37",
+                activeforeground="white",
+                relief="flat",
+                padx=16,
+                pady=9,
+                font=("Segoe UI Semibold", 10),
+            ).pack(side="right", padx=(0, 10))
+
+    def show(self) -> Path | None:
+        self.dialog.wait_window()
+        return self.result_path
+
+    def _load_items(self) -> None:
+        self.saved_tree.delete(*self.saved_tree.get_children())
+        self.items = self.studio.list_saved_artwork()
+        for item in self.items:
+            self.saved_tree.insert(
+                "",
+                "end",
+                iid=item["path"],
+                values=(item["id"], item["format"], item["size"], item["saved_at"], item["name"]),
+            )
+
+        if self.items:
+            first = self.items[0]["path"]
+            self.saved_tree.selection_set(first)
+            self.saved_tree.focus(first)
+            self.saved_tree.see(first)
+            self._on_item_selected()
+        else:
+            self._clear_preview("当前还没有保存过素材。")
+
+    def _on_item_selected(self, _event=None) -> None:
+        selection = self.saved_tree.selection()
+        if not selection:
+            return
+
+        path = Path(selection[0])
+        try:
+            with Image.open(path) as image:
+                preview = image.convert("RGBA")
+                preview.thumbnail((280, 280), Image.Resampling.LANCZOS)
+                self.preview_image = ImageTk.PhotoImage(preview)
+                size = f"{image.size[0]}x{image.size[1]}"
+        except OSError:
+            self._clear_preview("无法读取这张素材。")
+            return
+
+        self.saved_preview_canvas.delete("all")
+        self.saved_preview_canvas.create_image(150, 150, image=self.preview_image, anchor="center")
+
+        stem_parts = path.stem.split("_", 1)
+        image_id = stem_parts[0]
+        image_format = stem_parts[1] if len(stem_parts) == 2 else ""
+        self.saved_meta_label.configure(
+            text="\n".join(
+                [
+                    f"文件名: {path.name}",
+                    f"素材 ID: {image_id}",
+                    f"格式码: {image_format}",
+                    f"尺寸:   {size}",
+                    f"路径:   {path}",
+                ]
+            )
+        )
+        hint = "双击或点右下角按钮即可拿来替换当前素材。" if self.pick_mode else "这些收藏素材会跨不同固件会话保留。"
+        self.saved_hint_label.configure(text=hint)
+
+    def _clear_preview(self, message: str) -> None:
+        self.preview_image = None
+        self.saved_preview_canvas.delete("all")
+        self.saved_preview_canvas.create_text(150, 150, text="暂无预览", fill=MUTED, font=("Segoe UI", 11))
+        self.saved_meta_label.configure(text="")
+        self.saved_hint_label.configure(text=message)
+
+    def _open_saved_dir(self) -> None:
+        saved_dir = self.studio.saved_assets_dir()
+        try:
+            os.startfile(str(saved_dir))  # type: ignore[attr-defined]
+        except AttributeError:
+            subprocess.run(["explorer", str(saved_dir)], check=False)
+
+    def _confirm_pick(self) -> None:
+        selection = self.saved_tree.selection()
+        if not selection:
+            messagebox.showinfo("先选素材", "请先在左侧列表里选中一张收藏素材。", parent=self.dialog)
+            return
+        self.result_path = Path(selection[0])
+        self.dialog.destroy()
+
+    def _on_double_click(self, _event=None) -> None:
+        if self.pick_mode:
+            self._confirm_pick()
+
+
+class SavedAssetBrowserDialog:
+    def __init__(
+        self,
+        parent: tk.Tk,
+        studio: ThemeStudio,
+        pick_mode: bool = False,
+        import_callback=None,
+        reduce_callback=None,
+        resize_callback=None,
+    ) -> None:
+        self.parent = parent
+        self.studio = studio
+        self.pick_mode = pick_mode
+        self.import_callback = import_callback
+        self.reduce_callback = reduce_callback
+        self.resize_callback = resize_callback
+        self.result_path: Path | None = None
+        self.preview_image: ImageTk.PhotoImage | None = None
+        self.items_by_path: dict[str, dict[str, str]] = {}
+        self.search_var = tk.StringVar()
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("已保存素材")
+        self.dialog.geometry("1180x700")
+        self.dialog.minsize(1020, 600)
+        self.dialog.configure(bg=BG)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self._build_layout()
+        self._load_items()
+
+    def _build_layout(self) -> None:
+        container = tk.Frame(self.dialog, bg=CARD, padx=18, pady=18)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+        container.rowconfigure(2, weight=1)
+        container.columnconfigure(0, weight=1)
+        container.columnconfigure(1, weight=0)
+
+        title = "从收藏素材中选择" if self.pick_mode else "已保存素材库"
+        tk.Label(
+            container,
+            text=title,
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 17),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        search_row = tk.Frame(container, bg=CARD)
+        search_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        search_row.columnconfigure(1, weight=1)
+
+        tk.Label(search_row, text="搜索", bg=CARD, fg=TEXT, font=("Segoe UI Semibold", 10)).grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+        search_entry = tk.Entry(
+            search_row,
+            textvariable=self.search_var,
+            relief="flat",
+            bg="#f7f1e7",
+            fg=TEXT,
+            insertbackground=TEXT,
+            font=("Segoe UI", 10),
+        )
+        search_entry.grid(row=0, column=1, sticky="ew")
+        search_entry.bind("<KeyRelease>", self._load_items)
+        tk.Label(search_row, text="可搜索文件名和备注", bg=CARD, fg=MUTED, font=("Segoe UI", 9)).grid(
+            row=0, column=2, sticky="w", padx=(10, 0)
+        )
+
+        list_card = tk.Frame(container, bg=CARD)
+        list_card.grid(row=2, column=0, sticky="nsew", pady=(14, 0))
+        list_card.rowconfigure(0, weight=1)
+        list_card.columnconfigure(0, weight=1)
+
+        columns = ("id", "format", "size", "saved_at", "note", "name")
+        self.saved_tree = ttk.Treeview(list_card, columns=columns, show="headings", selectmode="browse")
+        self.saved_tree.heading("id", text="ID")
+        self.saved_tree.heading("format", text="格式")
+        self.saved_tree.heading("size", text="尺寸")
+        self.saved_tree.heading("saved_at", text="保存时间")
+        self.saved_tree.heading("note", text="备注")
+        self.saved_tree.heading("name", text="文件名")
+        self.saved_tree.column("id", width=90, anchor="w")
+        self.saved_tree.column("format", width=90, anchor="center")
+        self.saved_tree.column("size", width=90, anchor="center")
+        self.saved_tree.column("saved_at", width=130, anchor="center")
+        self.saved_tree.column("note", width=180, anchor="w")
+        self.saved_tree.column("name", width=220, anchor="w")
+        self.saved_tree.grid(row=0, column=0, sticky="nsew")
+        self.saved_tree.bind("<<TreeviewSelect>>", self._on_item_selected)
+        self.saved_tree.bind("<Double-1>", self._on_double_click)
+
+        scrollbar = ttk.Scrollbar(list_card, orient="vertical", command=self.saved_tree.yview)
+        self.saved_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        preview_card = tk.Frame(container, bg="#f7f1e7", padx=14, pady=14)
+        preview_card.grid(row=2, column=1, sticky="ns", padx=(16, 0), pady=(14, 0))
+
+        self.saved_preview_canvas = tk.Canvas(
+            preview_card,
+            width=300,
+            height=300,
+            bg=ACCENT_LIGHT,
+            highlightthickness=0,
+            relief="flat",
+        )
+        self.saved_preview_canvas.pack()
+
+        self.saved_meta_label = tk.Label(
+            preview_card,
+            text="",
+            bg="#f7f1e7",
+            fg=TEXT,
+            justify="left",
+            anchor="w",
+            wraplength=300,
+            font=("Consolas", 10),
+        )
+        self.saved_meta_label.pack(fill="x", pady=(12, 0))
+
+        self.saved_hint_label = tk.Label(
+            preview_card,
+            text="先在左侧选一张收藏素材。",
+            bg="#f7f1e7",
+            fg=MUTED,
+            justify="left",
+            wraplength=300,
+            font=("Segoe UI", 10),
+        )
+        self.saved_hint_label.pack(fill="x", pady=(10, 0))
+
+        buttons = tk.Frame(container, bg=CARD)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+        self.button_bar = buttons
+
+        tk.Button(
+            buttons,
+            text="从电脑导入",
+            command=self._import_from_computer,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left")
+        tk.Button(
+            buttons,
+            text="编辑备注",
+            command=self._edit_note,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left", padx=(10, 0))
+        tk.Button(
+            buttons,
+            text="1888 降色",
+            command=self._resize_selected_saved_asset,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left", padx=(10, 0))
+        tk.Button(
+            buttons,
+            text="1888 闄嶈壊",
+            command=self._reduce_selected_saved_asset,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left", padx=(10, 0))
+        tk.Button(
+            buttons,
+            text="删除收藏",
+            command=self._delete_selected,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left", padx=(10, 0))
+        tk.Button(
+            buttons,
+            text="打开收藏目录",
+            command=self._open_saved_dir,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left", padx=(10, 0))
+        tk.Button(
+            buttons,
+            text="刷新列表",
+            command=self._load_items,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left", padx=(10, 0))
+        tk.Button(
+            buttons,
+            text="关闭",
+            command=self.dialog.destroy,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="right")
+
+        if self.pick_mode:
+            tk.Button(
+                buttons,
+                text="使用这张素材",
+                command=self._confirm_pick,
+                bg=ACCENT,
+                fg="white",
+                activebackground="#173b37",
+                activeforeground="white",
+                relief="flat",
+                padx=16,
+                pady=9,
+                font=("Segoe UI Semibold", 10),
+            ).pack(side="right", padx=(0, 10))
+
+    def show(self) -> Path | None:
+        self.dialog.wait_window()
+        return self.result_path
+
+    def _normalize_saved_button_labels(self) -> None:
+        buttons = [widget for widget in self.button_bar.winfo_children() if isinstance(widget, tk.Button)]
+        labels = ["从电脑导入", "编辑备注", "调整尺寸", "1888 降色", "删除收藏", "打开收藏目录", "刷新列表"]
+        for widget, label in zip(buttons, labels):
+            widget.configure(text=label)
+
+    def _selected_path(self) -> Path | None:
+        selection = self.saved_tree.selection()
+        if not selection:
+            return None
+        return Path(selection[0])
+
+    def _selected_paths(self) -> list[Path]:
+        return [Path(item) for item in self.saved_tree.selection()]
+
+    def _load_items(self, _event=None, keep_path: str | None = None) -> None:
+        selected = keep_path
+        if selected is None:
+            current = self._selected_path()
+            selected = str(current) if current else None
+
+        self.saved_tree.delete(*self.saved_tree.get_children())
+        items = self.studio.list_saved_artwork(self.search_var.get())
+        self.items_by_path = {item["path"]: item for item in items}
+
+        for item in items:
+            self.saved_tree.insert(
+                "",
+                "end",
+                iid=item["path"],
+                values=(item["id"], item["format"], item["size"], item["saved_at"], item.get("note", ""), item["name"]),
+            )
+
+        if not items:
+            self._clear_preview("当前还没有符合搜索条件的收藏素材。")
+            return
+
+        chosen = selected if selected in self.items_by_path else items[0]["path"]
+        self.saved_tree.selection_set(chosen)
+        self.saved_tree.focus(chosen)
+        self.saved_tree.see(chosen)
+        self._on_item_selected()
+
+    def _on_item_selected(self, _event=None) -> None:
+        path = self._selected_path()
+        if not paths:
+            return
+
+        item = self.items_by_path.get(str(path), {})
+        try:
+            with Image.open(path) as image:
+                preview = image.convert("RGBA")
+                preview.thumbnail((280, 280), Image.Resampling.LANCZOS)
+                self.preview_image = ImageTk.PhotoImage(preview)
+                size = f"{image.size[0]}x{image.size[1]}"
+        except OSError:
+            self._clear_preview("无法读取这张素材。")
+            return
+
+        self.saved_preview_canvas.delete("all")
+        self.saved_preview_canvas.create_image(150, 150, image=self.preview_image, anchor="center")
+
+        image_id = item.get("id", "")
+        image_format = item.get("format", "")
+        note = item.get("note", "")
+        self.saved_meta_label.configure(
+            text="\n".join(
+                [
+                    f"文件名: {path.name}",
+                    f"素材 ID: {image_id or '-'}",
+                    f"格式码: {image_format or '-'}",
+                    f"尺寸:   {size}",
+                    f"备注:   {note or '-'}",
+                    f"路径:   {path}",
+                ]
+            )
+        )
+        hint = "双击或点右下角按钮即可拿来替换当前素材。" if self.pick_mode else "收藏素材会跨不同固件会话保留。"
+        self.saved_hint_label.configure(text=hint)
+
+    def _clear_preview(self, message: str) -> None:
+        self.preview_image = None
+        self.saved_preview_canvas.delete("all")
+        self.saved_preview_canvas.create_text(150, 150, text="暂无预览", fill=MUTED, font=("Segoe UI", 11))
+        self.saved_meta_label.configure(text="")
+        self.saved_hint_label.configure(text=message)
+
+    def _parse_saved_item_name(self, path: Path) -> tuple[str, str]:
+        parts = path.stem.split("_")
+        if len(parts) >= 2 and parts[0].isdigit() and len(parts[1]) == 4 and parts[1].isdigit():
+            return parts[0], parts[1]
+        return "", ""
+
+    def _reduce_selected_saved_asset(self) -> None:
+        path = self._selected_path()
+        if path is None:
+            messagebox.showinfo("先选素材", "请先在左侧列表里选中一张收藏素材。", parent=self.dialog)
+            return
+
+        if self.reduce_callback is None:
+            messagebox.showinfo("当前不可用", "这个窗口当前没有绑定降色动作。", parent=self.dialog)
+            return
+
+        item = self.items_by_path.get(str(path), {})
+        updated = self.reduce_callback(path, item)
+        if updated is not None:
+            self._load_items(keep_path=str(updated))
+
+    def _resize_selected_saved_asset(self) -> None:
+        path = self._selected_path()
+        if path is None:
+            messagebox.showinfo("先选素材", "请先在左侧列表里选中一张收藏素材。", parent=self.dialog)
+            return
+
+        if self.resize_callback is None:
+            messagebox.showinfo("当前不可用", "这个窗口当前没有绑定尺寸调整动作。", parent=self.dialog)
+            return
+
+        item = self.items_by_path.get(str(path), {})
+        updated = self.resize_callback(path, item)
+        if updated is not None:
+            self._load_items(keep_path=str(updated))
+
+    def _import_from_computer(self) -> None:
+        if self.import_callback is None:
+            messagebox.showinfo("当前不可用", "这个窗口当前没有绑定导入动作。", parent=self.dialog)
+            return
+
+        imported = self.import_callback()
+        if imported is not None:
+            self._load_items(keep_path=str(imported))
+
+    def _edit_note(self) -> None:
+        path = self._selected_path()
+        if path is None:
+            messagebox.showinfo("先选素材", "请先在左侧列表里选中一张收藏素材。", parent=self.dialog)
+            return
+
+        current_note = self.items_by_path.get(str(path), {}).get("note", "")
+        new_note = simpledialog.askstring("编辑备注", "输入新的备注：", initialvalue=current_note, parent=self.dialog)
+        if new_note is None:
+            return
+
+        self.studio.update_saved_artwork_note(path, new_note)
+        self._load_items(keep_path=str(path))
+
+    def _delete_selected(self) -> None:
+        paths = self._selected_paths()
+        if path is None:
+            messagebox.showinfo("先选素材", "请先在左侧列表里选中一张收藏素材。", parent=self.dialog)
+            return
+
+        confirmed = messagebox.askyesno("删除收藏", f"确定要删除这张收藏素材吗？\n\n{path.name}", parent=self.dialog)
+        if not confirmed:
+            return
+
+        for path in paths:
+            self.studio.delete_saved_artwork(path)
+        self._load_items()
+
+    def _open_saved_dir(self) -> None:
+        saved_dir = self.studio.saved_assets_dir()
+        try:
+            os.startfile(str(saved_dir))  # type: ignore[attr-defined]
+        except AttributeError:
+            subprocess.run(["explorer", str(saved_dir)], check=False)
+
+    def _confirm_pick(self) -> None:
+        path = self._selected_path()
+        if path is None:
+            messagebox.showinfo("先选素材", "请先在左侧列表里选中一张收藏素材。", parent=self.dialog)
+            return
+        self.result_path = path
+        self.dialog.destroy()
+
+    def _on_double_click(self, _event=None) -> None:
+        if self.pick_mode:
+            self._confirm_pick()
+
+
+class SavedAssetBrowserDialog:
+    def __init__(
+        self,
+        parent: tk.Tk,
+        studio: ThemeStudio,
+        pick_mode: bool = False,
+        import_callback=None,
+        reduce_callback=None,
+        resize_callback=None,
+    ) -> None:
+        self.parent = parent
+        self.studio = studio
+        self.pick_mode = pick_mode
+        self.import_callback = import_callback
+        self.reduce_callback = reduce_callback
+        self.resize_callback = resize_callback
+        self.result_path: Path | None = None
+        self.preview_image: ImageTk.PhotoImage | None = None
+        self.items_by_path: dict[str, dict[str, str]] = {}
+        self.search_var = tk.StringVar()
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("已保存素材")
+        self.dialog.geometry("1180x700")
+        self.dialog.minsize(1020, 600)
+        self.dialog.configure(bg=BG)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self._build_layout()
+        self._load_items()
+
+    def _build_layout(self) -> None:
+        container = tk.Frame(self.dialog, bg=CARD, padx=18, pady=18)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+        container.rowconfigure(2, weight=1)
+        container.columnconfigure(0, weight=1)
+        container.columnconfigure(1, weight=0)
+
+        title = "从收藏素材中选择" if self.pick_mode else "已保存素材库"
+        tk.Label(
+            container,
+            text=title,
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 17),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        search_row = tk.Frame(container, bg=CARD)
+        search_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        search_row.columnconfigure(1, weight=1)
+
+        tk.Label(search_row, text="搜索", bg=CARD, fg=TEXT, font=("Segoe UI Semibold", 10)).grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+        search_entry = tk.Entry(
+            search_row,
+            textvariable=self.search_var,
+            relief="flat",
+            bg="#f7f1e7",
+            fg=TEXT,
+            insertbackground=TEXT,
+            font=("Segoe UI", 10),
+        )
+        search_entry.grid(row=0, column=1, sticky="ew")
+        search_entry.bind("<KeyRelease>", self._load_items)
+        tk.Label(
+            search_row,
+            text="可搜索文件名和备注",
+            bg=CARD,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+        ).grid(row=0, column=2, sticky="w", padx=(10, 0))
+
+        list_card = tk.Frame(container, bg=CARD)
+        list_card.grid(row=2, column=0, sticky="nsew", pady=(14, 0))
+        list_card.rowconfigure(0, weight=1)
+        list_card.columnconfigure(0, weight=1)
+
+        columns = ("id", "format", "size", "saved_at", "note", "name")
+        self.saved_tree = ttk.Treeview(list_card, columns=columns, show="headings", selectmode="extended")
+        self.saved_tree.heading("id", text="ID")
+        self.saved_tree.heading("format", text="格式")
+        self.saved_tree.heading("size", text="尺寸")
+        self.saved_tree.heading("saved_at", text="保存时间")
+        self.saved_tree.heading("note", text="备注")
+        self.saved_tree.heading("name", text="文件名")
+        self.saved_tree.column("id", width=90, anchor="w")
+        self.saved_tree.column("format", width=90, anchor="center")
+        self.saved_tree.column("size", width=90, anchor="center")
+        self.saved_tree.column("saved_at", width=130, anchor="center")
+        self.saved_tree.column("note", width=180, anchor="w")
+        self.saved_tree.column("name", width=220, anchor="w")
+        self.saved_tree.grid(row=0, column=0, sticky="nsew")
+        self.saved_tree.bind("<<TreeviewSelect>>", self._on_item_selected)
+        self.saved_tree.bind("<Double-1>", self._on_double_click)
+
+        scrollbar = ttk.Scrollbar(list_card, orient="vertical", command=self.saved_tree.yview)
+        self.saved_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        preview_card = tk.Frame(container, bg="#f7f1e7", padx=14, pady=14)
+        preview_card.grid(row=2, column=1, sticky="ns", padx=(16, 0), pady=(14, 0))
+
+        self.saved_preview_canvas = tk.Canvas(
+            preview_card,
+            width=300,
+            height=300,
+            bg=ACCENT_LIGHT,
+            highlightthickness=0,
+            relief="flat",
+        )
+        self.saved_preview_canvas.pack()
+
+        self.saved_meta_label = tk.Label(
+            preview_card,
+            text="",
+            bg="#f7f1e7",
+            fg=TEXT,
+            justify="left",
+            anchor="w",
+            wraplength=300,
+            font=("Consolas", 10),
+        )
+        self.saved_meta_label.pack(fill="x", pady=(12, 0))
+
+        self.saved_hint_label = tk.Label(
+            preview_card,
+            text="先在左侧选一张收藏素材。",
+            bg="#f7f1e7",
+            fg=MUTED,
+            justify="left",
+            wraplength=300,
+            font=("Segoe UI", 10),
+        )
+        self.saved_hint_label.pack(fill="x", pady=(10, 0))
+
+        buttons = tk.Frame(container, bg=CARD)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+
+        left_actions = tk.Frame(buttons, bg=CARD)
+        left_actions.pack(side="left")
+        right_actions = tk.Frame(buttons, bg=CARD)
+        right_actions.pack(side="right")
+
+        action_specs = [
+            ("从电脑导入", self._import_from_computer),
+            ("编辑备注", self._edit_note),
+            ("调整尺寸", self._resize_selected_saved_asset),
+            ("1888 降色", self._reduce_selected_saved_asset),
+            ("删除收藏", self._delete_selected),
+            ("打开收藏目录", self._open_saved_dir),
+            ("刷新列表", self._load_items),
+        ]
+        for index, (label, command) in enumerate(action_specs):
+            tk.Button(
+                left_actions,
+                text=label,
+                command=command,
+                bg="#ebe1cf",
+                fg=TEXT,
+                activebackground="#dfd0b5",
+                activeforeground=TEXT,
+                relief="flat",
+                padx=14,
+                pady=9,
+                font=("Segoe UI Semibold", 10),
+            ).pack(side="left", padx=(0 if index == 0 else 10, 0))
+
+        tk.Button(
+            right_actions,
+            text="关闭",
+            command=self.dialog.destroy,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="right")
+
+        if self.pick_mode:
+            tk.Button(
+                right_actions,
+                text="使用这张素材",
+                command=self._confirm_pick,
+                bg=ACCENT,
+                fg="white",
+                activebackground="#173b37",
+                activeforeground="white",
+                relief="flat",
+                padx=16,
+                pady=9,
+                font=("Segoe UI Semibold", 10),
+            ).pack(side="right", padx=(0, 10))
+
+    def show(self) -> Path | None:
+        self.dialog.wait_window()
+        return self.result_path
+
+    def _selected_path(self) -> Path | None:
+        selection = self.saved_tree.selection()
+        if not selection:
+            return None
+        return Path(selection[0])
+
+    def _selected_paths(self) -> list[Path]:
+        return [Path(item) for item in self.saved_tree.selection()]
+
+    def _load_items(self, _event=None, keep_path: str | None = None) -> None:
+        selected = keep_path
+        if selected is None:
+            current = self._selected_path()
+            selected = str(current) if current else None
+
+        self.saved_tree.delete(*self.saved_tree.get_children())
+        items = self.studio.list_saved_artwork(self.search_var.get())
+        self.items_by_path = {item["path"]: item for item in items}
+
+        for item in items:
+            self.saved_tree.insert(
+                "",
+                "end",
+                iid=item["path"],
+                values=(item["id"], item["format"], item["size"], item["saved_at"], item.get("note", ""), item["name"]),
+            )
+
+        if not items:
+            self._clear_preview("当前还没有符合搜索条件的收藏素材。")
+            return
+
+        chosen = selected if selected in self.items_by_path else items[0]["path"]
+        self.saved_tree.selection_set(chosen)
+        self.saved_tree.focus(chosen)
+        self.saved_tree.see(chosen)
+        self._on_item_selected()
+
+    def _on_item_selected(self, _event=None) -> None:
+        path = self._selected_path()
+        if path is None:
+            return
+
+        item = self.items_by_path.get(str(path), {})
+        try:
+            with Image.open(path) as image:
+                preview = image.convert("RGBA")
+                preview.thumbnail((280, 280), Image.Resampling.LANCZOS)
+                self.preview_image = ImageTk.PhotoImage(preview)
+                size = f"{image.size[0]}x{image.size[1]}"
+        except OSError:
+            self._clear_preview("无法读取这张素材。")
+            return
+
+        self.saved_preview_canvas.delete("all")
+        self.saved_preview_canvas.create_image(150, 150, image=self.preview_image, anchor="center")
+
+        image_id = item.get("id", "")
+        image_format = item.get("format", "")
+        note = item.get("note", "")
+        self.saved_meta_label.configure(
+            text="\n".join(
+                [
+                    f"文件名: {path.name}",
+                    f"素材 ID: {image_id or '-'}",
+                    f"格式码: {image_format or '-'}",
+                    f"尺寸:   {size}",
+                    f"备注:   {note or '-'}",
+                    f"路径:   {path}",
+                ]
+            )
+        )
+        hint = "双击或点右下角按钮即可拿来替换当前素材。" if self.pick_mode else "收藏素材会跨不同固件会话保留。"
+        self.saved_hint_label.configure(text=hint)
+
+    def _clear_preview(self, message: str) -> None:
+        self.preview_image = None
+        self.saved_preview_canvas.delete("all")
+        self.saved_preview_canvas.create_text(150, 150, text="暂无预览", fill=MUTED, font=("Segoe UI", 11))
+        self.saved_meta_label.configure(text="")
+        self.saved_hint_label.configure(text=message)
+
+    def _import_from_computer(self) -> None:
+        if self.import_callback is None:
+            messagebox.showinfo("当前不可用", "这个窗口当前没有绑定导入动作。", parent=self.dialog)
+            return
+
+        imported = self.import_callback()
+        if imported is not None:
+            self._load_items(keep_path=str(imported))
+
+    def _edit_note(self) -> None:
+        path = self._selected_path()
+        if path is None:
+            messagebox.showinfo("先选素材", "请先在左侧列表里选中一张收藏素材。", parent=self.dialog)
+            return
+
+        current_note = self.items_by_path.get(str(path), {}).get("note", "")
+        new_note = simpledialog.askstring("编辑备注", "输入新的备注：", initialvalue=current_note, parent=self.dialog)
+        if new_note is None:
+            return
+
+        self.studio.update_saved_artwork_note(path, new_note)
+        self._load_items(keep_path=str(path))
+
+    def _resize_selected_saved_asset(self) -> None:
+        path = self._selected_path()
+        if path is None:
+            messagebox.showinfo("先选素材", "请先在左侧列表里选中一张收藏素材。", parent=self.dialog)
+            return
+
+        if self.resize_callback is None:
+            messagebox.showinfo("当前不可用", "这个窗口当前没有绑定尺寸调整动作。", parent=self.dialog)
+            return
+
+        item = self.items_by_path.get(str(path), {})
+        updated = self.resize_callback(path, item)
+        if updated is not None:
+            self._load_items(keep_path=str(updated))
+
+    def _reduce_selected_saved_asset(self) -> None:
+        path = self._selected_path()
+        if path is None:
+            messagebox.showinfo("先选素材", "请先在左侧列表里选中一张收藏素材。", parent=self.dialog)
+            return
+
+        if self.reduce_callback is None:
+            messagebox.showinfo("当前不可用", "这个窗口当前没有绑定降色动作。", parent=self.dialog)
+            return
+
+        item = self.items_by_path.get(str(path), {})
+        updated = self.reduce_callback(path, item)
+        if updated is not None:
+            self._load_items(keep_path=str(updated))
+
+    def _delete_selected(self) -> None:
+        paths = self._selected_paths()
+        if not paths:
+            messagebox.showinfo("先选素材", "请先在左侧列表里选中至少一张收藏素材。", parent=self.dialog)
+            return
+
+        sample_names = "\n".join(path.name for path in paths[:5])
+        if len(paths) > 5:
+            sample_names += f"\n... 共 {len(paths)} 张"
+
+        confirmed = messagebox.askyesno(
+            "删除收藏",
+            f"确定要删除这 {len(paths)} 张收藏素材吗？\n\n{sample_names}",
+            parent=self.dialog,
+        )
+        if not confirmed:
+            return
+
+        for path in paths:
+            self.studio.delete_saved_artwork(path)
+        self._load_items()
+
+    def _open_saved_dir(self) -> None:
+        saved_dir = self.studio.saved_assets_dir()
+        try:
+            os.startfile(str(saved_dir))  # type: ignore[attr-defined]
+        except AttributeError:
+            subprocess.run(["explorer", str(saved_dir)], check=False)
+
+    def _confirm_pick(self) -> None:
+        path = self._selected_path()
+        if path is None:
+            messagebox.showinfo("先选素材", "请先在左侧列表里选中一张收藏素材。", parent=self.dialog)
+            return
+        self.result_path = path
+        self.dialog.destroy()
+
+    def _on_double_click(self, _event=None) -> None:
+        if self.pick_mode:
+            self._confirm_pick()
 
 
 class ThemeStudioApp:
@@ -126,6 +1937,7 @@ class ThemeStudioApp:
         self._add_sidebar_button(sidebar, "加载官方固件并解包", self._import_official)
         self._add_sidebar_button(sidebar, "导入社区 IPSW", self._import_community_ipsw)
         self._add_sidebar_button(sidebar, "打开 body 目录", self._open_body_dir)
+        self._add_sidebar_button(sidebar, "查看已保存素材", self._show_saved_assets)
         self._add_sidebar_button(sidebar, "重新扫描素材列表", self._refresh_assets)
         self._add_sidebar_button(sidebar, "生成修改后的 IPSW", self._build_ipsw)
         self._add_sidebar_button(sidebar, "关于与版权", self._show_about)
@@ -311,8 +2123,13 @@ class ThemeStudioApp:
             font=("Segoe UI", 10),
         ).grid(row=3, column=0, sticky="ew", pady=(10, 12))
 
+        action_row = tk.Frame(self.preview_panel, bg=CARD)
+        action_row.grid(row=4, column=0, sticky="ew")
+        action_row.columnconfigure(0, weight=1)
+        action_row.columnconfigure(1, weight=1)
+
         replace_btn = tk.Button(
-            self.preview_panel,
+            action_row,
             text="替换当前素材",
             command=self._replace_current_asset,
             bg=ACCENT,
@@ -324,7 +2141,37 @@ class ThemeStudioApp:
             pady=10,
             font=("Segoe UI Semibold", 10),
         )
-        replace_btn.grid(row=4, column=0, sticky="ew")
+        replace_btn.grid(row=0, column=0, sticky="ew")
+
+        save_btn = tk.Button(
+            action_row,
+            text="保存当前素材",
+            command=self._save_current_asset,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=16,
+            pady=10,
+            font=("Segoe UI Semibold", 10),
+        )
+        save_btn.grid(row=0, column=1, sticky="ew", padx=(10, 0))
+
+        reduce_btn = tk.Button(
+            action_row,
+            text="对当前 1888 降色",
+            command=self._reduce_color_and_replace,
+            bg="#ebe1cf",
+            fg=TEXT,
+            activebackground="#dfd0b5",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=16,
+            pady=10,
+            font=("Segoe UI Semibold", 10),
+        )
+        reduce_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
         log_card = ttk.Frame(workspace, style="Card.TFrame", padding=14)
         log_card.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(16, 0))
@@ -648,6 +2495,899 @@ class ThemeStudioApp:
         )
         self.preview_canvas.itemconfigure(self.preview_placeholder_id, state="hidden")
 
+    def _replace_current_asset(self) -> None:
+        if not self.current_selection:
+            messagebox.showinfo("先选素材", "请先在左侧列表中选中一个系统素材。")
+            return
+
+        path = filedialog.askopenfilename(
+            title="选择要替换进去的图片",
+            filetypes=[
+                ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
+                ("PNG image", "*.png"),
+                ("JPEG image", "*.jpg;*.jpeg"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+
+        candidate = Path(path)
+        try:
+            prepared_candidate = self._prepare_replacement_candidate(self.current_selection, candidate)
+        except StudioError as exc:
+            messagebox.showerror("处理图片失败", str(exc))
+            return
+
+        if prepared_candidate is None:
+            return
+
+        try:
+            new_name, notes = self.studio.replace_artwork(self.current_selection, prepared_candidate)
+        except StudioError as exc:
+            messagebox.showerror("替换失败", str(exc))
+            return
+
+        old_name = self.current_selection
+        self._append_log("log", f"已替换 {old_name} <- {candidate.name}")
+        if prepared_candidate != candidate:
+            self._append_log("log", "已先生成适配后的中间 PNG，并按目标素材规则完成替换。")
+        self.notes_var.set("；".join(notes))
+        self._refresh_assets()
+        if self.asset_tree.exists(new_name):
+            self.asset_tree.selection_set(new_name)
+            self.asset_tree.focus(new_name)
+            self.asset_tree.see(new_name)
+            self.current_selection = new_name
+            self._on_asset_selected()
+
+    def _prepare_replacement_candidate(self, target_name: str, candidate: Path) -> Path | None:
+        target_path = self.studio.body_dir() / target_name
+        if not target_path.exists():
+            raise StudioError(f"没有找到目标素材：{target_name}")
+
+        with Image.open(target_path) as target_image:
+            target_size = target_image.size
+
+        with Image.open(candidate) as candidate_image:
+            candidate_size = candidate_image.size
+
+        if candidate_size != target_size:
+            messagebox.showinfo(
+                "需要先裁剪",
+                (
+                    f"新图尺寸是 {candidate_size[0]}x{candidate_size[1]}，但目标素材需要 "
+                    f"{target_size[0]}x{target_size[1]}。\n\n"
+                    "接下来会打开内置裁剪窗口，你可以像手机相册那样拖动和缩放来取景。"
+                ),
+            )
+            return self._open_crop_dialog(candidate, target_name, target_size)
+
+        wants_crop = messagebox.askyesnocancel(
+            "如何处理这张图？",
+            (
+                "这张图片已经是目标尺寸。\n\n"
+                "是：打开内置裁剪/缩放窗口，再微调取景\n"
+                "否：直接转成 PNG 并替换\n"
+                "取消：放弃本次替换"
+            ),
+        )
+        if wants_crop is None:
+            return None
+        if wants_crop:
+            return self._open_crop_dialog(candidate, target_name, target_size)
+        return self._stage_candidate_png(candidate, target_name)
+
+    def _open_crop_dialog(self, candidate: Path, target_name: str, target_size: tuple[int, int]) -> Path | None:
+        dialog = CropResizeDialog(self.root, candidate, target_name, target_size)
+        result = dialog.show()
+        if result is None:
+            self._append_log("log", "已取消本次内置裁剪操作。")
+        return result
+
+    def _stage_candidate_png(self, candidate: Path, target_name: str) -> Path:
+        WORK_INPUTS.mkdir(parents=True, exist_ok=True)
+        target_stem = Path(target_name).stem
+        timestamp = time.strftime("%Y%m%d%H%M%S")
+        output_path = WORK_INPUTS / f"{target_stem}_prepared_{timestamp}.png"
+        with Image.open(candidate) as image:
+            image.convert("RGBA").save(output_path, "PNG")
+        return output_path
+
+    def _replace_current_asset(self) -> None:
+        if not self.current_selection:
+            messagebox.showinfo("先选素材", "请先在左侧列表中选中一个系统素材。")
+            return
+
+        candidate = self._choose_replacement_candidate()
+        if candidate is None:
+            return
+
+        try:
+            prepared_candidate = self._prepare_replacement_candidate(self.current_selection, candidate)
+        except StudioError as exc:
+            messagebox.showerror("处理图片失败", str(exc))
+            return
+
+        if prepared_candidate is None:
+            return
+
+        try:
+            new_name, notes = self.studio.replace_artwork(self.current_selection, prepared_candidate)
+        except StudioError as exc:
+            messagebox.showerror("替换失败", str(exc))
+            return
+
+        old_name = self.current_selection
+        self._append_log("log", f"已替换 {old_name} <- {candidate.name}")
+        if prepared_candidate != candidate:
+            self._append_log("log", f"已先生成适配后的 PNG：{prepared_candidate.name}")
+        self.notes_var.set("；".join(notes))
+        self._refresh_assets()
+        if self.asset_tree.exists(new_name):
+            self.asset_tree.selection_set(new_name)
+            self.asset_tree.focus(new_name)
+            self.asset_tree.see(new_name)
+            self.current_selection = new_name
+            self._on_asset_selected()
+
+    def _choose_replacement_candidate(self) -> Path | None:
+        source_choice = messagebox.askyesnocancel(
+            "替换来源",
+            "是：从电脑选择新图片\n否：从收藏素材中选择\n取消：放弃本次替换",
+        )
+        if source_choice is None:
+            return None
+        if source_choice:
+            path = filedialog.askopenfilename(
+                title="选择要替换进去的图片",
+                filetypes=[
+                    ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
+                    ("PNG image", "*.png"),
+                    ("JPEG image", "*.jpg;*.jpeg"),
+                    ("All files", "*.*"),
+                ],
+            )
+            return Path(path) if path else None
+        return self._pick_saved_asset()
+
+    def _pick_saved_asset(self) -> Path | None:
+        if not self.studio.list_saved_artwork():
+            messagebox.showinfo("还没有收藏素材", "当前收藏库还是空的，先用“保存当前素材”收集几张喜欢的图吧。")
+            return None
+        dialog = SavedAssetBrowserDialog(self.root, self.studio, pick_mode=True)
+        return dialog.show()
+
+    def _show_saved_assets(self) -> None:
+        SavedAssetBrowserDialog(self.root, self.studio, pick_mode=False).show()
+
+    def _save_current_asset(self) -> None:
+        if not self.current_selection:
+            messagebox.showinfo("先选素材", "请先在左侧列表中选中一个系统素材。")
+            return
+
+        try:
+            saved_path = self.studio.save_artwork_copy(self.current_selection)
+        except StudioError as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+
+        self._append_log("log", f"已收藏素材：{saved_path.name}")
+        messagebox.showinfo("保存完成", f"已保存到收藏素材库：\n{saved_path}")
+
+    def _pick_saved_asset(self) -> Path | None:
+        if not self.studio.list_saved_artwork():
+            messagebox.showinfo("还没有收藏素材", "当前收藏库还是空的，先用“保存当前素材”收集几张喜欢的图吧。")
+            return None
+        dialog = SavedAssetBrowserDialog(
+            self.root,
+            self.studio,
+            pick_mode=True,
+            import_callback=self._import_file_to_saved_assets,
+            reduce_callback=self._reduce_saved_library_asset,
+        )
+        return dialog.show()
+
+    def _show_saved_assets(self) -> None:
+        SavedAssetBrowserDialog(
+            self.root,
+            self.studio,
+            pick_mode=False,
+            import_callback=self._import_file_to_saved_assets,
+            reduce_callback=self._reduce_saved_library_asset,
+        ).show()
+
+    def _save_current_asset(self) -> None:
+        if not self.current_selection:
+            messagebox.showinfo("先选素材", "请先在左侧列表中选中一个系统素材。")
+            return
+
+        note = self._ask_saved_asset_note("")
+        if note is None:
+            return
+
+        try:
+            saved_path = self.studio.save_artwork_copy(self.current_selection, note=note)
+        except StudioError as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+
+        self._append_log("log", f"已收藏素材：{saved_path.name}")
+        messagebox.showinfo("保存完成", f"已保存到收藏素材库：\n{saved_path}")
+
+    def _import_file_to_saved_assets(self) -> Path | None:
+        path = filedialog.askopenfilename(
+            title="选择要导入到素材库的图片",
+            filetypes=[
+                ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
+                ("PNG image", "*.png"),
+                ("JPEG image", "*.jpg;*.jpeg"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return None
+
+        source = Path(path)
+        note = self._ask_saved_asset_note(source.stem)
+        if note is None:
+            return None
+
+        resize_now = messagebox.askyesnocancel(
+            "导入方式",
+            "是：现在就输入目标分辨率并进入裁剪/缩放\n否：原图直接保存到素材库\n取消：放弃本次导入",
+        )
+        if resize_now is None:
+            return None
+
+        candidate = source
+        if resize_now:
+            target_size = self._ask_target_size()
+            if target_size is None:
+                return None
+            cropped = self._open_crop_dialog(source, source.name, target_size)
+            if cropped is None:
+                return None
+            candidate = cropped
+
+        try:
+            saved_path = self.studio.import_saved_asset(candidate, note=note, preferred_name=source.name)
+        except StudioError as exc:
+            messagebox.showerror("导入失败", str(exc))
+            return None
+
+        self._append_log("log", f"已导入收藏素材：{saved_path.name}")
+        return saved_path
+
+    def _ask_saved_asset_note(self, initial_value: str) -> str | None:
+        return simpledialog.askstring(
+            "素材备注",
+            "给这张收藏素材写个备注吧，可留空：",
+            initialvalue=initial_value,
+            parent=self.root,
+        )
+
+    def _ask_target_size(self) -> tuple[int, int] | None:
+        value = simpledialog.askstring(
+            "目标分辨率",
+            "输入目标分辨率，格式例如 240x432：",
+            parent=self.root,
+        )
+        if value is None:
+            return None
+
+        text = value.lower().replace(" ", "")
+        if "x" not in text:
+            messagebox.showerror("格式不正确", "请输入类似 240x432 的分辨率格式。")
+            return None
+
+        width_text, height_text = text.split("x", 1)
+        if not width_text.isdigit() or not height_text.isdigit():
+            messagebox.showerror("格式不正确", "宽和高都必须是正整数。")
+            return None
+
+        width = int(width_text)
+        height = int(height_text)
+        if width <= 0 or height <= 0:
+            messagebox.showerror("格式不正确", "宽和高都必须大于 0。")
+            return None
+        return width, height
+
+    def _reduce_saved_library_asset(self, asset_path: Path, item: dict[str, str]) -> Path | None:
+        current_format = item.get("format", "")
+        if current_format != "1888":
+            messagebox.showinfo("当前素材不适用", "素材库里的这个条目当前不是 1888，无需使用这个降色按钮。", parent=self.root)
+            return None
+
+        target_choice = messagebox.askyesnocancel(
+            "目标降色格式",
+            "是：降到 0064\n否：降到 0065\n取消：放弃本次降色",
+            parent=self.root,
+        )
+        if target_choice is None:
+            return None
+        target_format = "0064" if target_choice else "0065"
+
+        action, strategy = self._open_reduction_decision(asset_path, target_format, allow_keep_original=False)
+        if action != "reduced":
+            return None
+
+        try:
+            reduced_candidate, reduction_notes = self._create_reduced_candidate(
+                asset_path.name,
+                asset_path,
+                target_format,
+                strategy,
+            )
+            image_id = item.get("id", "")
+            output_name = f"{image_id}_{target_format}.png" if image_id else asset_path.name
+            updated_path = self.studio.replace_saved_artwork(asset_path, reduced_candidate, output_name=output_name)
+        except StudioError as exc:
+            messagebox.showerror("降色失败", str(exc), parent=self.root)
+            return None
+
+        self._append_log("log", f"已将收藏素材降色为 {target_format}：{updated_path.name}")
+        self._append_replacement_notes_to_log(reduction_notes)
+        return updated_path
+
+    def _resize_saved_library_asset(self, asset_path: Path, item: dict[str, str]) -> Path | None:
+        target_size = self._ask_target_size()
+        if target_size is None:
+            return None
+
+        cropped = self._open_crop_dialog(asset_path, asset_path.name, target_size)
+        if cropped is None:
+            return None
+
+        try:
+            updated_path = self.studio.replace_saved_artwork(asset_path, cropped, output_name=asset_path.name)
+        except StudioError as exc:
+            messagebox.showerror("调整尺寸失败", str(exc), parent=self.root)
+            return None
+
+        self._append_log("log", f"已调整收藏素材尺寸：{updated_path.name} -> {target_size[0]}x{target_size[1]}")
+        return updated_path
+
+    def _pick_saved_asset(self) -> Path | None:
+        if not self.studio.list_saved_artwork():
+            messagebox.showinfo("还没有收藏素材", "当前收藏库还是空的，先用“保存当前素材”收集几张喜欢的图吧。")
+            return None
+        dialog = SavedAssetBrowserDialog(
+            self.root,
+            self.studio,
+            pick_mode=True,
+            import_callback=self._import_file_to_saved_assets,
+            reduce_callback=self._reduce_saved_library_asset,
+            resize_callback=self._resize_saved_library_asset,
+        )
+        return dialog.show()
+
+    def _show_saved_assets(self) -> None:
+        SavedAssetBrowserDialog(
+            self.root,
+            self.studio,
+            pick_mode=False,
+            import_callback=self._import_file_to_saved_assets,
+            reduce_callback=self._reduce_saved_library_asset,
+            resize_callback=self._resize_saved_library_asset,
+        ).show()
+
+    def _ask_target_size(self) -> tuple[int, int] | None:
+        dialog = SizeInputDialog(self.root)
+        return dialog.show()
+
+    def _replace_current_asset(self) -> None:
+        if not self.current_selection:
+            messagebox.showinfo("先选素材", "请先在左侧列表中选中一个系统素材。")
+            return
+
+        candidate = self._choose_replacement_candidate()
+        if candidate is None:
+            return
+
+        try:
+            prepared_candidate = self._prepare_replacement_candidate(self.current_selection, candidate)
+        except StudioError as exc:
+            messagebox.showerror("处理图片失败", str(exc))
+            return
+
+        if prepared_candidate is None:
+            return
+
+        try:
+            new_name, notes = self.studio.replace_artwork(self.current_selection, prepared_candidate)
+        except StudioError as exc:
+            messagebox.showerror("替换失败", str(exc))
+            return
+
+        old_name = self.current_selection
+        self._append_log("log", f"已替换 {old_name} <- {candidate.name}")
+        if prepared_candidate != candidate:
+            self._append_log("log", "已先生成适配后的中间 PNG，并按目标素材规则完成替换。")
+        self._append_replacement_notes_to_log(notes)
+        self.notes_var.set("；".join(notes))
+        self._refresh_assets()
+        if self.asset_tree.exists(new_name):
+            self.asset_tree.selection_set(new_name)
+            self.asset_tree.focus(new_name)
+            self.asset_tree.see(new_name)
+            self.current_selection = new_name
+            self._on_asset_selected()
+
+    def _reduce_color_and_replace(self) -> None:
+        if not self.current_selection:
+            messagebox.showinfo("先选素材", "请先在左侧列表中选中一个系统素材。")
+            return
+
+        target_format = self.current_selection.split("_", 1)[1].split(".", 1)[0]
+        if target_format not in {"0064", "0065"}:
+            messagebox.showinfo("当前格式不适用", "降色后替换目前只针对 0064 / 0065 目标素材。")
+            return
+
+        candidate = self._choose_replacement_candidate()
+        if candidate is None:
+            return
+
+        try:
+            prepared_candidate = self._prepare_replacement_candidate(self.current_selection, candidate)
+            if prepared_candidate is None:
+                return
+            reduced_candidate, reduction_notes = self._reduce_candidate_for_target_format(
+                self.current_selection,
+                prepared_candidate,
+            )
+            new_name, notes = self.studio.replace_artwork(self.current_selection, reduced_candidate)
+        except StudioError as exc:
+            messagebox.showerror("降色替换失败", str(exc))
+            return
+
+        all_notes = reduction_notes + notes
+        self._append_log("log", f"已降色并替换 {self.current_selection} <- {candidate.name}")
+        self._append_replacement_notes_to_log(all_notes)
+        self.notes_var.set("；".join(all_notes))
+        self._refresh_assets()
+        if self.asset_tree.exists(new_name):
+            self.asset_tree.selection_set(new_name)
+            self.asset_tree.focus(new_name)
+            self.asset_tree.see(new_name)
+            self.current_selection = new_name
+            self._on_asset_selected()
+
+    def _reduce_candidate_for_target_format(self, target_name: str, candidate_path: Path) -> tuple[Path, list[str]]:
+        target_format = target_name.split("_", 1)[1].split(".", 1)[0]
+        target_stem = Path(target_name).stem
+        timestamp = time.strftime("%Y%m%d%H%M%S")
+        output_path = WORK_INPUTS / f"{target_stem}_reduced_{timestamp}.png"
+        WORK_INPUTS.mkdir(parents=True, exist_ok=True)
+
+        if target_format == "0064":
+            with Image.open(candidate_path) as image:
+                reduced = image.convert("RGBA").quantize(colors=255, method=Image.Quantize.FASTOCTREE)
+                reduced.save(output_path, "PNG")
+            return output_path, ["已手动降色到 0064 目标范围（<=255 色）。"]
+
+        if target_format == "0065":
+            with Image.open(candidate_path) as image:
+                rgb = image.convert("RGB")
+                if np is not None:
+                    data = np.array(rgb, dtype=np.uint8)
+                    data[..., 0] = (data[..., 0] >> 3) << 3
+                    data[..., 1] = (data[..., 1] >> 2) << 2
+                    data[..., 2] = (data[..., 2] >> 3) << 3
+                    reduced = Image.fromarray(data, "RGB")
+                else:
+                    red, green, blue = rgb.split()
+                    red = red.point(lambda value: (value >> 3) << 3)
+                    green = green.point(lambda value: (value >> 2) << 2)
+                    blue = blue.point(lambda value: (value >> 3) << 3)
+                    reduced = Image.merge("RGB", (red, green, blue))
+                reduced.save(output_path, "PNG")
+            return output_path, ["已手动降色到接近 RGB565 / 0065 的颜色范围。"]
+
+        raise StudioError(f"当前暂不支持把图片手动降到 {target_format}。")
+
+    def _append_replacement_notes_to_log(self, notes: list[str]) -> None:
+        for note in notes:
+            if "1888" in note or "降色" in note:
+                self._append_log("log", note)
+
+    def _replace_current_asset(self) -> None:
+        if not self.current_selection:
+            messagebox.showinfo("先选素材", "请先在左侧列表中选中一个系统素材。")
+            return
+
+        candidate = self._choose_replacement_candidate()
+        if candidate is None:
+            return
+
+        try:
+            prepared_candidate = self._prepare_replacement_candidate(self.current_selection, candidate)
+        except StudioError as exc:
+            messagebox.showerror("处理图片失败", str(exc))
+            return
+
+        if prepared_candidate is None:
+            return
+
+        target_format = self.current_selection.split("_", 1)[1].split(".", 1)[0]
+        replacement_candidate = prepared_candidate
+        pre_notes: list[str] = []
+
+        try:
+            predicted_name, _predicted_notes = self.studio.validate_replacement(self.current_selection, prepared_candidate)
+        except StudioError as exc:
+            messagebox.showerror("替换失败", str(exc))
+            return
+
+        if target_format in {"0064", "0065"} and predicted_name.endswith("_1888.png"):
+            action, strategy = self._open_reduction_decision(prepared_candidate, target_format)
+            if action == "cancel":
+                return
+            if action == "reduced":
+                replacement_candidate, pre_notes = self._create_reduced_candidate(
+                    self.current_selection,
+                    prepared_candidate,
+                    target_format,
+                    strategy,
+                )
+
+        try:
+            new_name, notes = self.studio.replace_artwork(self.current_selection, replacement_candidate)
+        except StudioError as exc:
+            messagebox.showerror("替换失败", str(exc))
+            return
+
+        all_notes = pre_notes + notes
+        self._append_log("log", f"已替换 {self.current_selection} <- {candidate.name}")
+        if prepared_candidate != candidate:
+            self._append_log("log", "已先生成适配后的中间 PNG，并按目标素材规则完成替换。")
+        self._append_replacement_notes_to_log(all_notes)
+        self.notes_var.set("；".join(all_notes))
+        self._refresh_assets()
+        if self.asset_tree.exists(new_name):
+            self.asset_tree.selection_set(new_name)
+            self.asset_tree.focus(new_name)
+            self.asset_tree.see(new_name)
+            self.current_selection = new_name
+            self._on_asset_selected()
+
+    def _reduce_color_and_replace(self) -> None:
+        if not self.current_selection:
+            messagebox.showinfo("先选素材", "请先在左侧列表中选中一个系统素材。")
+            return
+
+        current_format = self.current_selection.split("_", 1)[1].split(".", 1)[0]
+        if current_format != "1888":
+            messagebox.showinfo("当前素材不适用", "这个按钮现在只用于把当前已经是 1888 的素材手动降色。")
+            return
+
+        target_choice = messagebox.askyesnocancel(
+            "目标降色格式",
+            "是：降到 0064\n否：降到 0065\n取消：放弃本次降色",
+        )
+        if target_choice is None:
+            return
+        target_format = "0064" if target_choice else "0065"
+
+        source_path = self.studio.body_dir() / self.current_selection
+        action, strategy = self._open_reduction_decision(source_path, target_format, allow_keep_original=False)
+        if action != "reduced":
+            return
+
+        try:
+            reduced_candidate, reduction_notes = self._create_reduced_candidate(
+                self.current_selection,
+                source_path,
+                target_format,
+                strategy,
+            )
+            new_name, notes = self.studio.replace_artwork_with_format(
+                self.current_selection,
+                reduced_candidate,
+                target_format,
+            )
+        except StudioError as exc:
+            messagebox.showerror("降色失败", str(exc))
+            return
+
+        all_notes = reduction_notes + notes
+        self._append_log("log", f"已把当前 1888 素材手动降到 {target_format}。")
+        self._append_replacement_notes_to_log(all_notes)
+        self.notes_var.set("；".join(all_notes))
+        self._refresh_assets()
+        if self.asset_tree.exists(new_name):
+            self.asset_tree.selection_set(new_name)
+            self.asset_tree.focus(new_name)
+            self.asset_tree.see(new_name)
+            self.current_selection = new_name
+            self._on_asset_selected()
+
+    def _open_reduction_decision(
+        self,
+        source_path: Path,
+        target_format: str,
+        allow_keep_original: bool = True,
+    ) -> tuple[str, str]:
+        title = "是否尝试降色到原格式" if allow_keep_original else "对当前 1888 素材降色"
+        dialog = ReductionPreviewDialog(
+            self.root,
+            source_path,
+            target_format,
+            self._render_reduced_image_for_strategy,
+            allow_keep_original,
+            title,
+        )
+        return dialog.show()
+
+    def _create_reduced_candidate(
+        self,
+        target_name: str,
+        source_path: Path,
+        target_format: str,
+        strategy: str,
+    ) -> tuple[Path, list[str]]:
+        with Image.open(source_path) as image:
+            reduced = self._render_reduced_image_for_strategy(image, target_format, strategy)
+        target_stem = Path(target_name).stem
+        timestamp = time.strftime("%Y%m%d%H%M%S")
+        output_path = WORK_INPUTS / f"{target_stem}_reduced_{target_format}_{timestamp}.png"
+        WORK_INPUTS.mkdir(parents=True, exist_ok=True)
+        reduced.save(output_path, "PNG")
+        return output_path, [f"已按“{strategy}”策略手动降到 {target_format}。"]
+
+    def _render_reduced_image_for_strategy(
+        self,
+        source_image: Image.Image,
+        target_format: str,
+        strategy: str,
+    ) -> Image.Image:
+        if target_format == "0064":
+            working = source_image.convert("RGBA")
+            if strategy == "平滑":
+                working = working.filter(ImageFilter.GaussianBlur(radius=0.35))
+                dither = Image.Dither.NONE
+            elif strategy == "锐利":
+                working = working.filter(ImageFilter.UnsharpMask(radius=0.6, percent=120, threshold=2))
+                dither = Image.Dither.FLOYDSTEINBERG
+            else:
+                dither = Image.Dither.NONE
+            reduced = working.quantize(colors=255, method=Image.Quantize.FASTOCTREE, dither=dither)
+            return reduced.convert("RGBA")
+
+        if target_format == "0065":
+            working = source_image.convert("RGB")
+            if strategy == "平滑":
+                working = working.filter(ImageFilter.GaussianBlur(radius=0.35))
+            elif strategy == "锐利":
+                working = working.filter(ImageFilter.UnsharpMask(radius=0.6, percent=120, threshold=2))
+
+            if np is not None:
+                data = np.array(working, dtype=np.uint8)
+                data[..., 0] = (data[..., 0] >> 3) << 3
+                data[..., 1] = (data[..., 1] >> 2) << 2
+                data[..., 2] = (data[..., 2] >> 3) << 3
+                return Image.fromarray(data, "RGB").convert("RGBA")
+
+            red, green, blue = working.split()
+            red = red.point(lambda value: (value >> 3) << 3)
+            green = green.point(lambda value: (value >> 2) << 2)
+            blue = blue.point(lambda value: (value >> 3) << 3)
+            return Image.merge("RGB", (red, green, blue)).convert("RGBA")
+
+        raise StudioError(f"当前暂不支持预览 {target_format} 的降色效果。")
+
+    def _append_replacement_notes_to_log(self, notes: list[str]) -> None:
+        for note in notes:
+            if "1888" in note or "降到" in note or "手动按" in note:
+                self._append_log("log", note)
+
+    def _replacement_source_format(self) -> str:
+        item = getattr(self, "_last_replacement_item", None)
+        if isinstance(item, dict):
+            return item.get("format", "")
+        return ""
+
+    def _prepare_candidate_for_saved_format(
+        self,
+        candidate_path: Path,
+        target_name: str,
+        preferred_format: str,
+    ) -> tuple[Path, list[str]]:
+        if preferred_format not in {"0004", "0008", "0064", "0065", "0565"}:
+            return candidate_path, []
+
+        WORK_INPUTS.mkdir(parents=True, exist_ok=True)
+        target_stem = Path(target_name).stem
+        timestamp = time.strftime("%Y%m%d%H%M%S")
+        output_path = WORK_INPUTS / f"{target_stem}_preserve_{preferred_format}_{timestamp}.png"
+
+        with Image.open(candidate_path) as image:
+            if preferred_format == "0004":
+                prepared = image.convert("L").quantize(
+                    colors=16,
+                    method=Image.Quantize.FASTOCTREE,
+                    dither=Image.Dither.NONE,
+                ).convert("RGBA")
+            elif preferred_format == "0008":
+                prepared = image.convert("L").quantize(
+                    colors=256,
+                    method=Image.Quantize.FASTOCTREE,
+                    dither=Image.Dither.NONE,
+                ).convert("RGBA")
+            elif preferred_format == "0064":
+                prepared = image.convert("RGBA").quantize(
+                    colors=255,
+                    method=Image.Quantize.FASTOCTREE,
+                    dither=Image.Dither.NONE,
+                ).convert("RGBA")
+            else:
+                rgb = image.convert("RGB")
+                if np is not None:
+                    data = np.array(rgb, dtype=np.uint8)
+                    data[..., 0] = (data[..., 0] >> 3) << 3
+                    data[..., 1] = (data[..., 1] >> 2) << 2
+                    data[..., 2] = (data[..., 2] >> 3) << 3
+                    prepared = Image.fromarray(data, "RGB").convert("RGBA")
+                else:
+                    red, green, blue = rgb.split()
+                    red = red.point(lambda value: (value >> 3) << 3)
+                    green = green.point(lambda value: (value >> 2) << 2)
+                    blue = blue.point(lambda value: (value >> 3) << 3)
+                    prepared = Image.merge("RGB", (red, green, blue)).convert("RGBA")
+
+        prepared.save(output_path, "PNG")
+        return output_path, [f"已按收藏素材的 {preferred_format} 格式特性处理 resize 后的中间图。"]
+
+    def _prepare_replacement_candidate(self, target_name: str, candidate: Path) -> Path | None:
+        self._last_prepare_notes = []
+
+        target_path = self.studio.body_dir() / target_name
+        if not target_path.exists():
+            raise StudioError(f"没有找到目标素材：{target_name}")
+
+        with Image.open(target_path) as target_image:
+            target_size = target_image.size
+
+        with Image.open(candidate) as candidate_image:
+            candidate_size = candidate_image.size
+
+        if candidate_size != target_size:
+            messagebox.showinfo(
+                "需要先裁剪",
+                (
+                    f"新图尺寸是 {candidate_size[0]}x{candidate_size[1]}，但目标素材需要 "
+                    f"{target_size[0]}x{target_size[1]}。\n\n"
+                    "接下来会打开内置裁剪窗口，你可以像手机相册那样拖动和缩放来取景。"
+                ),
+            )
+            prepared = self._open_crop_dialog(candidate, target_name, target_size)
+        else:
+            wants_crop = messagebox.askyesnocancel(
+                "如何处理这张图？",
+                (
+                    "这张图片已经是目标尺寸。\n\n"
+                    "是：打开内置裁剪/缩放窗口，再微调取景\n"
+                    "否：直接转成 PNG 并替换\n"
+                    "取消：放弃本次替换"
+                ),
+            )
+            if wants_crop is None:
+                return None
+            prepared = self._open_crop_dialog(candidate, target_name, target_size) if wants_crop else self._stage_candidate_png(candidate, target_name)
+
+        if prepared is None:
+            return None
+
+        preferred_format = self._replacement_source_format()
+        if preferred_format and preferred_format != "1888":
+            prepared, format_notes = self._prepare_candidate_for_saved_format(prepared, target_name, preferred_format)
+            self._last_prepare_notes.extend(format_notes)
+
+        return prepared
+
+    def _choose_replacement_candidate(self) -> Path | None:
+        self._last_replacement_item = None
+        self._last_prepare_notes = []
+
+        source_choice = messagebox.askyesnocancel(
+            "替换来源",
+            "是：从电脑选择新图片\n否：从收藏素材中选择\n取消：放弃本次替换",
+        )
+        if source_choice is None:
+            return None
+        if source_choice:
+            path = filedialog.askopenfilename(
+                title="选择要替换进去的图片",
+                filetypes=[
+                    ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
+                    ("PNG image", "*.png"),
+                    ("JPEG image", "*.jpg;*.jpeg"),
+                    ("All files", "*.*"),
+                ],
+            )
+            return Path(path) if path else None
+
+        picked = self._pick_saved_asset()
+        if picked is None:
+            return None
+
+        self._last_replacement_item = next(
+            (item for item in self.studio.list_saved_artwork() if item["path"] == str(picked)),
+            None,
+        )
+        return picked
+
+    def _replace_current_asset(self) -> None:
+        if not self.current_selection:
+            messagebox.showinfo("先选素材", "请先在左侧列表中选中一个系统素材。")
+            return
+
+        candidate = self._choose_replacement_candidate()
+        if candidate is None:
+            return
+
+        try:
+            prepared_candidate = self._prepare_replacement_candidate(self.current_selection, candidate)
+        except StudioError as exc:
+            messagebox.showerror("处理图片失败", str(exc))
+            return
+
+        if prepared_candidate is None:
+            return
+
+        target_format = self.current_selection.split("_", 1)[1].split(".", 1)[0]
+        source_format = self._replacement_source_format()
+        replacement_candidate = prepared_candidate
+        pre_notes: list[str] = list(getattr(self, "_last_prepare_notes", []))
+
+        try:
+            predicted_name, _predicted_notes = self.studio.validate_replacement(self.current_selection, prepared_candidate)
+        except StudioError as exc:
+            messagebox.showerror("替换失败", str(exc))
+            return
+
+        if target_format in {"0064", "0065"} and predicted_name.endswith("_1888.png"):
+            action, strategy = self._open_reduction_decision(prepared_candidate, target_format)
+            if action == "cancel":
+                return
+            if action == "reduced":
+                reduction_candidate, reduction_notes = self._create_reduced_candidate(
+                    self.current_selection,
+                    prepared_candidate,
+                    target_format,
+                    strategy,
+                )
+                replacement_candidate = reduction_candidate
+                pre_notes = list(getattr(self, "_last_prepare_notes", [])) + reduction_notes
+
+        try:
+            if target_format == "1888" and source_format in {"0004", "0008", "0064", "0065", "0565"}:
+                new_name, notes = self.studio.replace_artwork_with_format(
+                    self.current_selection,
+                    replacement_candidate,
+                    source_format,
+                )
+                notes = [f"已按收藏素材的 {source_format} 格式写回当前素材。"] + notes
+            else:
+                new_name, notes = self.studio.replace_artwork(self.current_selection, replacement_candidate)
+        except StudioError as exc:
+            messagebox.showerror("替换失败", str(exc))
+            return
+
+        all_notes = pre_notes + notes
+        self._append_log("log", f"已替换 {self.current_selection} <- {candidate.name}")
+        if prepared_candidate != candidate:
+            self._append_log("log", "已先生成适配后的中间 PNG，并按目标素材规则完成替换。")
+        self._append_replacement_notes_to_log(all_notes)
+        self.notes_var.set("；".join(all_notes))
+        self._refresh_assets()
+        if self.asset_tree.exists(new_name):
+            self.asset_tree.selection_set(new_name)
+            self.asset_tree.focus(new_name)
+            self.asset_tree.see(new_name)
+            self.current_selection = new_name
+            self._on_asset_selected()
+
     def _show_about(self) -> None:
         dialog = tk.Toplevel(self.root)
         dialog.title("关于与版权")
@@ -723,6 +3463,282 @@ class ThemeStudioApp:
 
     def run(self) -> None:
         self.root.mainloop()
+
+
+def _saved_asset_browser_delete_selected(self) -> None:
+    paths = self._selected_paths()
+    if not paths:
+        messagebox.showinfo("先选素材", "请先在左侧列表里选中至少一张收藏素材。", parent=self.dialog)
+        return
+
+    sample_names = "\n".join(path.name for path in paths[:5])
+    if len(paths) > 5:
+        sample_names += f"\n... 共 {len(paths)} 张"
+
+    choice = ActionChoiceDialog(
+        self.dialog,
+        "删除收藏",
+        f"确定要删除这 {len(paths)} 张收藏素材吗？\n\n{sample_names}",
+        [
+            ("delete", "删除这些素材", True),
+            ("cancel", "取消", False),
+        ],
+    ).show()
+    if choice != "delete":
+        return
+
+    for path in paths:
+        self.studio.delete_saved_artwork(path)
+    self._load_items()
+
+
+def _theme_studio_prepare_replacement_candidate(self, target_name: str, candidate: Path) -> Path | None:
+    self._last_prepare_notes = []
+
+    target_path = self.studio.body_dir() / target_name
+    if not target_path.exists():
+        raise StudioError(f"没有找到目标素材：{target_name}")
+
+    with Image.open(target_path) as target_image:
+        target_size = target_image.size
+
+    with Image.open(candidate) as candidate_image:
+        candidate_size = candidate_image.size
+
+    if candidate_size != target_size:
+        messagebox.showinfo(
+            "需要先裁剪",
+            (
+                f"新图尺寸是 {candidate_size[0]}x{candidate_size[1]}，但目标素材需要 "
+                f"{target_size[0]}x{target_size[1]}。\n\n"
+                "接下来会打开内置裁剪窗口，你可以像手机相册那样拖动和缩放来取景。"
+            ),
+        )
+        prepared = self._open_crop_dialog(candidate, target_name, target_size)
+    else:
+        choice = ActionChoiceDialog(
+            self.root,
+            "如何处理这张图？",
+            "这张图片已经是目标尺寸，请直接选择下一步操作。",
+            [
+                ("crop", "继续裁剪/缩放", True),
+                ("direct", "直接替换", False),
+                ("cancel", "取消", False),
+            ],
+        ).show()
+        if choice in {None, "cancel"}:
+            return None
+        prepared = self._open_crop_dialog(candidate, target_name, target_size) if choice == "crop" else self._stage_candidate_png(candidate, target_name)
+
+    if prepared is None:
+        return None
+
+    preferred_format = self._replacement_source_format()
+    if preferred_format and preferred_format != "1888":
+        prepared, format_notes = self._prepare_candidate_for_saved_format(prepared, target_name, preferred_format)
+        self._last_prepare_notes.extend(format_notes)
+
+    return prepared
+
+
+def _theme_studio_choose_replacement_candidate(self) -> Path | None:
+    self._last_replacement_item = None
+    self._last_prepare_notes = []
+
+    choice = ActionChoiceDialog(
+        self.root,
+        "替换来源",
+        "请选择这次替换要使用的图片来源。",
+        [
+            ("computer", "从电脑选图", True),
+            ("saved", "从收藏素材中选", False),
+            ("cancel", "取消", False),
+        ],
+    ).show()
+    if choice in {None, "cancel"}:
+        return None
+
+    if choice == "computer":
+        path = filedialog.askopenfilename(
+            title="选择要替换进去的图片",
+            filetypes=[
+                ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
+                ("PNG image", "*.png"),
+                ("JPEG image", "*.jpg;*.jpeg"),
+                ("All files", "*.*"),
+            ],
+        )
+        return Path(path) if path else None
+
+    picked = self._pick_saved_asset()
+    if picked is None:
+        return None
+
+    self._last_replacement_item = next(
+        (item for item in self.studio.list_saved_artwork() if item["path"] == str(picked)),
+        None,
+    )
+    return picked
+
+
+def _theme_studio_import_file_to_saved_assets(self) -> Path | None:
+    path = filedialog.askopenfilename(
+        title="选择要导入到素材库的图片",
+        filetypes=[
+            ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
+            ("PNG image", "*.png"),
+            ("JPEG image", "*.jpg;*.jpeg"),
+            ("All files", "*.*"),
+        ],
+    )
+    if not path:
+        return None
+
+    source = Path(path)
+    note = self._ask_saved_asset_note(source.stem)
+    if note is None:
+        return None
+
+    choice = ActionChoiceDialog(
+        self.root,
+        "导入方式",
+        "请选择导入到素材库时要不要先调整尺寸。",
+        [
+            ("resize", "先裁剪/缩放再保存", True),
+            ("direct", "直接保存原图", False),
+            ("cancel", "取消", False),
+        ],
+    ).show()
+    if choice in {None, "cancel"}:
+        return None
+
+    candidate = source
+    if choice == "resize":
+        target_size = self._ask_target_size()
+        if target_size is None:
+            return None
+        cropped = self._open_crop_dialog(source, source.name, target_size)
+        if cropped is None:
+            return None
+        candidate = cropped
+
+    try:
+        saved_path = self.studio.import_saved_asset(candidate, note=note, preferred_name=source.name)
+    except StudioError as exc:
+        messagebox.showerror("导入失败", str(exc))
+        return None
+
+    self._append_log("log", f"已导入收藏素材：{saved_path.name}")
+    return saved_path
+
+
+def _theme_studio_reduce_saved_library_asset(self, asset_path: Path, item: dict[str, str]) -> Path | None:
+    current_format = item.get("format", "")
+    if current_format != "1888":
+        messagebox.showinfo("当前素材不适用", "素材库里的这个条目当前不是 1888，无需使用这个降色按钮。", parent=self.root)
+        return None
+
+    choice = ActionChoiceDialog(
+        self.root,
+        "目标降色格式",
+        "请选择要把这张收藏素材降到哪个格式。",
+        [
+            ("0064", "降到 0064", True),
+            ("0065", "降到 0065", False),
+            ("cancel", "取消", False),
+        ],
+    ).show()
+    if choice in {None, "cancel"}:
+        return None
+    target_format = choice
+
+    action, strategy = self._open_reduction_decision(asset_path, target_format, allow_keep_original=False)
+    if action != "reduced":
+        return None
+
+    try:
+        reduced_candidate, reduction_notes = self._create_reduced_candidate(
+            asset_path.name,
+            asset_path,
+            target_format,
+            strategy,
+        )
+        image_id = item.get("id", "")
+        output_name = f"{image_id}_{target_format}.png" if image_id else asset_path.name
+        updated_path = self.studio.replace_saved_artwork(asset_path, reduced_candidate, output_name=output_name)
+    except StudioError as exc:
+        messagebox.showerror("降色失败", str(exc), parent=self.root)
+        return None
+
+    self._append_log("log", f"已将收藏素材降色为 {target_format}：{updated_path.name}")
+    self._append_replacement_notes_to_log(reduction_notes)
+    return updated_path
+
+
+def _theme_studio_reduce_color_and_replace(self) -> None:
+    if not self.current_selection:
+        messagebox.showinfo("先选素材", "请先在左侧列表中选中一个系统素材。")
+        return
+
+    current_format = self.current_selection.split("_", 1)[1].split(".", 1)[0]
+    if current_format != "1888":
+        messagebox.showinfo("当前素材不适用", "这个按钮现在只用于把当前已经是 1888 的素材手动降色。")
+        return
+
+    choice = ActionChoiceDialog(
+        self.root,
+        "目标降色格式",
+        "请选择要把当前 1888 素材降到哪个格式。",
+        [
+            ("0064", "降到 0064", True),
+            ("0065", "降到 0065", False),
+            ("cancel", "取消", False),
+        ],
+    ).show()
+    if choice in {None, "cancel"}:
+        return
+    target_format = choice
+
+    source_path = self.studio.body_dir() / self.current_selection
+    action, strategy = self._open_reduction_decision(source_path, target_format, allow_keep_original=False)
+    if action != "reduced":
+        return
+
+    try:
+        reduced_candidate, reduction_notes = self._create_reduced_candidate(
+            self.current_selection,
+            source_path,
+            target_format,
+            strategy,
+        )
+        new_name, notes = self.studio.replace_artwork_with_format(
+            self.current_selection,
+            reduced_candidate,
+            target_format,
+        )
+    except StudioError as exc:
+        messagebox.showerror("降色失败", str(exc))
+        return
+
+    all_notes = reduction_notes + notes
+    self._append_log("log", f"已把当前 1888 素材手动降到 {target_format}。")
+    self._append_replacement_notes_to_log(all_notes)
+    self.notes_var.set("；".join(all_notes))
+    self._refresh_assets()
+    if self.asset_tree.exists(new_name):
+        self.asset_tree.selection_set(new_name)
+        self.asset_tree.focus(new_name)
+        self.asset_tree.see(new_name)
+        self.current_selection = new_name
+        self._on_asset_selected()
+
+
+SavedAssetBrowserDialog._delete_selected = _saved_asset_browser_delete_selected
+ThemeStudioApp._prepare_replacement_candidate = _theme_studio_prepare_replacement_candidate
+ThemeStudioApp._choose_replacement_candidate = _theme_studio_choose_replacement_candidate
+ThemeStudioApp._import_file_to_saved_assets = _theme_studio_import_file_to_saved_assets
+ThemeStudioApp._reduce_saved_library_asset = _theme_studio_reduce_saved_library_asset
+ThemeStudioApp._reduce_color_and_replace = _theme_studio_reduce_color_and_replace
 
 
 def main() -> None:

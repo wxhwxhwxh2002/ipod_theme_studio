@@ -30,6 +30,8 @@ else:
 PROJECT_ROOT = APP_ROOT
 STUDIO_ROOT = APP_ROOT / "studio_workspace"
 CURRENT_ROOT = STUDIO_ROOT / "current"
+SAVED_ROOT = STUDIO_ROOT / "saved_assets"
+SAVED_METADATA_PATH = SAVED_ROOT / "metadata.json"
 SESSION_PATH = STUDIO_ROOT / "session.json"
 
 WORK_BODY = CURRENT_ROOT / "body"
@@ -140,7 +142,7 @@ class Img1Image:
 
 
 def _mkdirs() -> None:
-    for path in [STUDIO_ROOT, CURRENT_ROOT, WORK_BODY, WORK_EXPORTS, WORK_INPUTS, WORK_OUTPUTS, WORK_TMP]:
+    for path in [STUDIO_ROOT, CURRENT_ROOT, SAVED_ROOT, WORK_BODY, WORK_EXPORTS, WORK_INPUTS, WORK_OUTPUTS, WORK_TMP]:
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -153,6 +155,74 @@ def _reset_current_workspace() -> None:
 def _copy_file(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
+
+
+def _unique_target_path(directory: Path, name: str) -> Path:
+    candidate = directory / name
+    if not candidate.exists():
+        return candidate
+
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return directory / f"{stem}_{timestamp}{suffix}"
+
+
+def _load_saved_metadata() -> dict[str, dict[str, str]]:
+    if not SAVED_METADATA_PATH.exists():
+        return {}
+    try:
+        return json.loads(SAVED_METADATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_saved_metadata(data: dict[str, dict[str, str]]) -> None:
+    SAVED_ROOT.mkdir(parents=True, exist_ok=True)
+    SAVED_METADATA_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _parse_artwork_filename(path: Path) -> tuple[str, str]:
+    stem = path.stem
+    parts = stem.split("_")
+    if len(parts) >= 2 and parts[0].isdigit() and len(parts[1]) == 4 and parts[1].isdigit():
+        return parts[0], parts[1]
+    return "", ""
+
+
+def _detect_saved_artwork_format(path: Path) -> str:
+    try:
+        with Image.open(path) as image:
+            rgba = image.convert("RGBA")
+            colors = set(rgba.getdata())
+    except OSError:
+        return ""
+
+    if any(pixel[3] != 255 for pixel in colors):
+        return "1888"
+
+    rgb_colors = {(red, green, blue) for red, green, blue, _alpha in colors}
+    grayscale = all(red == green == blue for red, green, blue in rgb_colors)
+    color_count = len(rgb_colors)
+
+    if grayscale:
+        if color_count <= 16:
+            return "0004"
+        if color_count <= 256:
+            return "0008"
+
+    # Only classify as 0065 when the image is already constrained to RGB565-like
+    # channel steps. Generic truecolor photos should remain 1888 in the library.
+    rgb565_like = all(
+        red % 8 == 0 and green % 4 == 0 and blue % 8 == 0
+        for red, green, blue in rgb_colors
+    )
+
+    if color_count <= 255:
+        return "0064"
+    if color_count <= 65536 and rgb565_like:
+        return "0065"
+    return "1888"
 
 
 def _patch_nano7_mse(mse_bytes: bytes) -> bytes:
@@ -583,6 +653,138 @@ class ThemeStudio:
             notes.append(f"已按同素材 ID 自动重命名为 {output_name}")
         return output_name, notes
 
+    def replace_artwork_with_format(
+        self,
+        target_name: str,
+        candidate_path: Path,
+        output_format: str,
+    ) -> tuple[str, list[str]]:
+        target_path = WORK_BODY / target_name
+        if not target_path.exists():
+            raise StudioError(f"目标素材不存在: {target_name}")
+
+        with Image.open(target_path) as target_image, Image.open(candidate_path) as candidate_image:
+            if target_image.size != candidate_image.size:
+                raise StudioError(
+                    f"尺寸不匹配: 原图 {target_image.size[0]}x{target_image.size[1]}，"
+                    f"替换图 {candidate_image.size[0]}x{candidate_image.size[1]}"
+                )
+
+        image_id = target_name.split("_", 1)[0]
+        for existing_path in WORK_BODY.glob(f"{image_id}_*.png"):
+            existing_path.unlink()
+
+        output_name = f"{image_id}_{output_format}.png"
+        shutil.copy2(candidate_path, WORK_BODY / output_name)
+        return output_name, [f"已手动按 {output_format} 格式写回当前素材。"]
+
+    def save_artwork_copy(self, asset_name: str, note: str = "") -> Path:
+        source_path = WORK_BODY / asset_name
+        if not source_path.exists():
+            raise StudioError(f"要保存的素材不存在: {asset_name}")
+
+        target_path = _unique_target_path(SAVED_ROOT, source_path.name)
+        _copy_file(source_path, target_path)
+        self.update_saved_artwork_note(target_path, note)
+        return target_path
+
+    def import_saved_asset(self, source_path: Path, note: str = "", preferred_name: str | None = None) -> Path:
+        if not source_path.exists():
+            raise StudioError(f"要导入的素材不存在: {source_path}")
+
+        target_name = preferred_name or source_path.name
+        target_path = _unique_target_path(SAVED_ROOT, target_name)
+        _copy_file(source_path, target_path)
+        self.update_saved_artwork_note(target_path, note)
+        return target_path
+
+    def replace_saved_artwork(
+        self,
+        asset_path: Path,
+        candidate_path: Path,
+        output_name: str | None = None,
+    ) -> Path:
+        if not asset_path.exists():
+            raise StudioError(f"要更新的收藏素材不存在: {asset_path}")
+        if not candidate_path.exists():
+            raise StudioError(f"新的收藏素材不存在: {candidate_path}")
+
+        target_name = output_name or asset_path.name
+        target_path = SAVED_ROOT / target_name
+
+        metadata = _load_saved_metadata()
+        entry = metadata.pop(asset_path.name, {})
+
+        if target_path != asset_path and target_path.exists():
+            target_path.unlink()
+
+        _copy_file(candidate_path, target_path)
+
+        if target_path != asset_path and asset_path.exists():
+            asset_path.unlink()
+
+        if entry:
+            entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            metadata[target_path.name] = entry
+
+        _save_saved_metadata(metadata)
+        return target_path
+
+    def delete_saved_artwork(self, asset_path: Path) -> None:
+        if asset_path.exists():
+            asset_path.unlink()
+
+        metadata = _load_saved_metadata()
+        if asset_path.name in metadata:
+            del metadata[asset_path.name]
+            _save_saved_metadata(metadata)
+
+    def update_saved_artwork_note(self, asset_path: Path, note: str) -> None:
+        metadata = _load_saved_metadata()
+        entry = metadata.get(asset_path.name, {})
+        entry["note"] = note.strip()
+        entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        metadata[asset_path.name] = entry
+        _save_saved_metadata(metadata)
+
+    def list_saved_artwork(self, search_text: str = "") -> list[dict[str, str]]:
+        if not SAVED_ROOT.exists():
+            return []
+
+        metadata = _load_saved_metadata()
+        allowed = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+        query = search_text.strip().lower()
+        items: list[dict[str, str]] = []
+        for path in sorted(
+            [item for item in SAVED_ROOT.iterdir() if item.is_file() and item.suffix.lower() in allowed],
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        ):
+            try:
+                with Image.open(path) as image:
+                    size = f"{image.size[0]}x{image.size[1]}"
+            except OSError:
+                size = "?"
+
+            image_id, image_format = _parse_artwork_filename(path)
+            if not image_format:
+                image_format = _detect_saved_artwork_format(path)
+            note = metadata.get(path.name, {}).get("note", "")
+            if query and query not in path.name.lower() and query not in note.lower():
+                continue
+            items.append(
+                {
+                    "name": path.name,
+                    "path": str(path),
+                    "id": image_id,
+                    "format": image_format,
+                    "size": size,
+                    "note": note,
+                    "saved_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                }
+            )
+        return items
+
     def repack_silverdb(self, log: LogFn) -> Path:
         if not WORK_BODY.exists():
             raise StudioError("还没有可打包的 body 目录。")
@@ -663,3 +865,7 @@ class ThemeStudio:
 
     def body_dir(self) -> Path:
         return WORK_BODY
+
+    def saved_assets_dir(self) -> Path:
+        SAVED_ROOT.mkdir(parents=True, exist_ok=True)
+        return SAVED_ROOT
