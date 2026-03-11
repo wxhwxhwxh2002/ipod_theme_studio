@@ -27,7 +27,6 @@ for %%F in (
   LICENSE
   README.md
   README.zh-CN.md
-  run_theme_studio.bat
 ) do (
   copy /y "%%F" "%BUNDLE_ROOT%\%%F" >nul
 )
@@ -56,24 +55,13 @@ echo Writing portable launcher...
   echo endlocal
 ) > "%BUNDLE_ROOT%\launch_theme_studio_portable.bat"
 
-echo Writing portable README...
-(
-  echo iPod Theme Studio Portable
-  echo ==========================
-  echo.
-  echo This folder is a no-install portable bundle for the GUI workflow.
-  echo.
-  echo How to use:
-  echo 1. Extract the full folder anywhere on your PC.
-  echo 2. Double-click "launch_theme_studio_portable.bat".
-  echo 3. Use the GUI to import official firmware or a community IPSW, browse artwork, replace assets, and repack.
-  echo.
-  echo Notes:
-  echo - Python and required libraries are bundled in "runtime\python".
-  echo - Rust, Cargo, and ARM GCC are not needed for the GUI workflow.
-  echo - Downloading official firmware still requires an internet connection.
-  echo - Repacked IPSW files are for use with iTunes/Finder restore workflows outside this tool.
-) > "%BUNDLE_ROOT%\README_PORTABLE.txt"
+echo Copying portable README...
+copy /y "portable_templates\README_PORTABLE.txt" "%BUNDLE_ROOT%\README_PORTABLE.txt" >nul
+if errorlevel 1 goto :copyfail
+
+echo Copying Chinese portable docs...
+powershell -NoProfile -ExecutionPolicy Bypass -File "portable_templates\copy_portable_docs.ps1" "%BUNDLE_ROOT%"
+if errorlevel 1 goto :copyfail
 
 echo Portable bundle is ready.
 echo Launch with:

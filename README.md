@@ -22,7 +22,7 @@ This fork repositions the project as `iPod Theme Studio`: a friendlier desktop-o
 
 - Added `theme_studio.py`, a desktop GUI for browsing, previewing, replacing, and repacking artwork
 - Added `theme_studio_core.py`, which wraps the unpack/replace/repack workflow for official firmware and community IPSW files
-- Added Windows-friendly launch/build helpers: `run_theme_studio.bat` and `build_theme_studio_exe.bat`
+- Added Windows-friendly launch/build helpers, including `run_theme_studio.bat` for source-based local runs
 - Added a portable bundle workflow through `build_portable_bundle.bat`, so Windows users can ship a no-install folder with a bundled Python runtime
 - Added artwork preview improvements, Nano 7 quick grouping shortcuts, and basic capacity-risk reminders for assets promoted to `_1888`
 - Added built-in crop / resize flow for oversized images, with higher-quality downscaling for wallpaper replacement
