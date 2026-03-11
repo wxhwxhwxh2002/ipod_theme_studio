@@ -137,18 +137,46 @@ For MacOS and Linux:
 export PIP_BREAK_SYSTEM_PACKAGES=1 && pip3 install fs pyfatfs fonttools pillow numpy opencv-python-headless
 ```
 
-If you already have the `ipod_theme` conda environment, you can launch the GUI with:
+For macOS users, a simple setup path is:
+
+1. Install Homebrew if needed:
 
 ```shell
-conda activate ipod_theme
-python theme_studio.py
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-On macOS you can also double-click `run_theme_studio.command`. On Windows, use `run_theme_studio.bat`.
+2. Install Python 3.11:
+
+```shell
+brew install python@3.11
+```
+
+3. Install the GUI dependencies:
+
+```shell
+python3 -m pip install fs pyfatfs fonttools pillow numpy opencv-python-headless
+```
+
+4. Launch the GUI:
+
+```shell
+python3 theme_studio.py
+```
+
+On macOS you can also double-click `run_theme_studio.command` after preparing Python and the dependencies. On Windows, use `run_theme_studio.bat`.
 
 For Windows, execute and close terminal:
 ```shell
 pip3 install fs pyfatfs fonttools pillow numpy opencv-python-headless
+```
+
+If you prefer conda, keep it in one place:
+
+```shell
+conda create -n ipod_theme python=3.11 -y
+conda activate ipod_theme
+python -m pip install fs pyfatfs fonttools pillow numpy opencv-python-headless
+python theme_studio.py
 ```
 
 #### 1) Download and unpack iPod firmware:
