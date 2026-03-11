@@ -165,6 +165,19 @@ python3 theme_studio.py
 
 On macOS you can also double-click `run_theme_studio.command` after preparing Python and the dependencies. On Windows, use `run_theme_studio.bat`.
 
+If `run_theme_studio.command` does not launch because of missing execute permission, run:
+
+```shell
+chmod +x run_theme_studio.command
+./run_theme_studio.command
+```
+
+If macOS still blocks it after copying or downloading the repo, run:
+
+```shell
+xattr -d com.apple.quarantine run_theme_studio.command
+```
+
 For Windows, execute and close terminal:
 ```shell
 pip3 install fs pyfatfs fonttools pillow numpy opencv-python-headless

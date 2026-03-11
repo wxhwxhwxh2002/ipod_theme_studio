@@ -116,6 +116,19 @@ python3 theme_studio.py
 run_theme_studio.command
 ```
 
+如果双击提示没有正确的访问权限，可以先执行：
+
+```shell
+chmod +x run_theme_studio.command
+./run_theme_studio.command
+```
+
+如果仓库是下载或拷贝过来的，macOS 仍然拦截它，可以再执行：
+
+```shell
+xattr -d com.apple.quarantine run_theme_studio.command
+```
+
 ## conda 可选方案
 
 如果你本来就在用 conda，或者更习惯隔离环境，可以统一按下面这组命令来做：
