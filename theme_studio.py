@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import queue
+import shutil
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -22,18 +24,89 @@ from PIL import Image, ImageDraw, ImageFilter, ImageTk
 from theme_studio_core import APP_ROOT, ThemeStudio, StudioError, WORK_INPUTS
 
 
-BG = "#f4efe6"
-CARD = "#fffaf0"
-ACCENT = "#204f4a"
-ACCENT_LIGHT = "#d9ebe4"
-TEXT = "#1d2b28"
-MUTED = "#61706d"
+BG = "#edf2f7"
+CARD = "#ffffff"
+ACCENT = "#0f6fff"
+ACCENT_LIGHT = "#eaf2ff"
+TEXT = "#162031"
+MUTED = "#5f6b7a"
+SOFT_BG = "#f5f8fc"
+BORDER = "#d7e0eb"
+PRIMARY_ACTIVE = "#0b5de3"
+SECONDARY_BG = "#f4f7fb"
+SECONDARY_ACTIVE = "#e4ebf4"
+SECONDARY_TEXT = "#204a8f"
+LOG_BG = "#0f1726"
+LOG_TEXT = "#e7eef9"
+STATUS_BG = "#163e76"
+STATUS_TEXT = "#d9e8ff"
 PREVIEW_CANVAS_WIDTH = 360
 PREVIEW_CANVAS_HEIGHT = 320
 CROP_CANVAS_WIDTH = 520
 CROP_CANVAS_HEIGHT = 420
 APP_ICON_PNG = APP_ROOT / "studio_icon.png"
 APP_ICON_ICO = APP_ROOT / "studio_icon.ico"
+IS_WINDOWS = sys.platform.startswith("win")
+IS_MACOS = sys.platform == "darwin"
+UI_FONT_FAMILY = "Helvetica Neue" if IS_MACOS else "Segoe UI"
+MONO_FONT_FAMILY = "Menlo" if IS_MACOS else "Consolas"
+IMAGE_FILE_TYPES = [
+    ("Image files", ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp")),
+    ("PNG image", "*.png"),
+    ("JPEG image", ("*.jpg", "*.jpeg")),
+    ("All files", "*"),
+]
+
+
+def ui_font(size: int, bold: bool = False) -> tuple[str, int, str]:
+    return (UI_FONT_FAMILY, size, "bold" if bold else "normal")
+
+
+def mono_font(size: int) -> tuple[str, int]:
+    return (MONO_FONT_FAMILY, size)
+
+
+def button_style(variant: str = "secondary") -> dict[str, object]:
+    if variant == "primary":
+        if IS_MACOS:
+            return {
+                "bg": "#dce9ff",
+                "fg": SECONDARY_TEXT,
+                "activebackground": "#cfe0ff",
+                "activeforeground": SECONDARY_TEXT,
+            }
+        return {
+            "bg": ACCENT,
+            "fg": "white",
+            "activebackground": PRIMARY_ACTIVE,
+            "activeforeground": "white",
+        }
+    return {
+        "bg": SECONDARY_BG,
+        "fg": SECONDARY_TEXT,
+        "activebackground": SECONDARY_ACTIVE,
+        "activeforeground": SECONDARY_TEXT,
+    }
+
+
+def open_in_file_manager(path: Path, parent: tk.Misc | None = None) -> None:
+    try:
+        if hasattr(os, "startfile"):
+            os.startfile(str(path))  # type: ignore[attr-defined]
+            return
+
+        if IS_MACOS:
+            subprocess.run(["open", str(path)], check=True)
+            return
+
+        opener = shutil.which("xdg-open")
+        if opener:
+            subprocess.run([opener, str(path)], check=True)
+            return
+
+        raise OSError("当前系统没有可用的文件管理器启动命令。")
+    except Exception as exc:
+        messagebox.showerror("打开目录失败", f"无法打开目录：\n{path}\n\n{exc}", parent=parent)
 
 
 class CropResizeDialog:
@@ -97,6 +170,8 @@ class CropResizeDialog:
         self.preview_canvas.bind("<B1-Motion>", self._on_drag)
         self.preview_canvas.bind("<ButtonRelease-1>", self._on_drag_end)
         self.preview_canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+        self.preview_canvas.bind("<Button-4>", self._on_mouse_wheel)
+        self.preview_canvas.bind("<Button-5>", self._on_mouse_wheel)
         self.preview_canvas.bind("<Configure>", self._on_canvas_resize)
 
         tk.Label(
@@ -148,11 +223,9 @@ class CropResizeDialog:
             buttons,
             text="重置取景",
             command=self._reset_view,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -162,11 +235,9 @@ class CropResizeDialog:
             buttons,
             text="取消",
             command=self._cancel,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -176,11 +247,9 @@ class CropResizeDialog:
             buttons,
             text="生成替换图",
             command=self._confirm,
-            bg=ACCENT,
-            fg="white",
-            activebackground="#173b37",
-            activeforeground="white",
+            **button_style("primary"),
             relief="flat",
+            bd=0,
             padx=16,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -277,7 +346,14 @@ class CropResizeDialog:
         self._render()
 
     def _on_mouse_wheel(self, event) -> None:
-        delta = 0.1 if event.delta > 0 else -0.1
+        if getattr(event, "num", None) == 4:
+            delta = 0.1
+        elif getattr(event, "num", None) == 5:
+            delta = -0.1
+        elif getattr(event, "delta", 0) == 0:
+            return
+        else:
+            delta = 0.1 if event.delta > 0 else -0.1
         next_zoom = min(6.0, max(1.0, self.zoom_var.get() + delta))
         self.zoom_var.set(next_zoom)
         self._on_zoom_changed()
@@ -386,8 +462,8 @@ class SizeInputDialog:
 
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("目标分辨率")
-        self.dialog.geometry("360x210")
-        self.dialog.minsize(320, 190)
+        self.dialog.geometry("380x236")
+        self.dialog.minsize(340, 220)
         self.dialog.configure(bg=BG)
         self.dialog.transient(parent)
         self.dialog.grab_set()
@@ -450,11 +526,9 @@ class SizeInputDialog:
             buttons,
             text="取消",
             command=self.dialog.destroy,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=8,
             font=("Segoe UI Semibold", 10),
@@ -464,11 +538,9 @@ class SizeInputDialog:
             buttons,
             text="确定",
             command=self._confirm,
-            bg=ACCENT,
-            fg="white",
-            activebackground="#173b37",
-            activeforeground="white",
+            **button_style("primary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=8,
             font=("Segoe UI Semibold", 10),
@@ -506,8 +578,16 @@ class ActionChoiceDialog:
         self.result: str | None = None
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(title)
-        self.dialog.geometry("440x240")
-        self.dialog.minsize(380, 220)
+        message_lines = message.count("\n") + 1
+        longest_line = max((len(line) for line in message.splitlines()), default=0)
+        longest_label = max((len(label) for _, label, _ in actions), default=0)
+        button_count = max(len(actions), 1)
+
+        dialog_width = max(520, min(760, 220 + longest_line * 7 + button_count * 90 + longest_label * 8))
+        dialog_height = max(280, min(560, 200 + message_lines * 24))
+
+        self.dialog.geometry(f"{dialog_width}x{dialog_height}")
+        self.dialog.minsize(500, 260)
         self.dialog.configure(bg=BG)
         self.dialog.transient(parent)
         self.dialog.grab_set()
@@ -530,7 +610,7 @@ class ActionChoiceDialog:
             bg=CARD,
             fg=TEXT,
             justify="left",
-            wraplength=380,
+            wraplength=max(420, dialog_width - 96),
             font=("Segoe UI", 10),
         ).grid(row=1, column=0, sticky="w", pady=(12, 0))
 
@@ -542,11 +622,9 @@ class ActionChoiceDialog:
                 button_row,
                 text=label,
                 command=lambda selected=value: self._choose(selected),
-                bg=ACCENT if primary else "#ebe1cf",
-                fg="white" if primary else TEXT,
-                activebackground="#173b37" if primary else "#dfd0b5",
-                activeforeground="white" if primary else TEXT,
+                **button_style("primary" if primary else "secondary"),
                 relief="flat",
+                bd=0,
                 padx=14,
                 pady=9,
                 font=("Segoe UI Semibold", 10),
@@ -693,11 +771,9 @@ class ReductionPreviewDialog:
             buttons,
             text="取消",
             command=self.dialog.destroy,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -707,11 +783,9 @@ class ReductionPreviewDialog:
             buttons,
             text="应用当前降色",
             command=self._apply_reduced,
-            bg=ACCENT,
-            fg="white",
-            activebackground="#173b37",
-            activeforeground="white",
+            **button_style("primary"),
             relief="flat",
+            bd=0,
             padx=16,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -722,11 +796,9 @@ class ReductionPreviewDialog:
                 buttons,
                 text="保持 1888（推荐）",
                 command=self._keep_original,
-                bg="#ebe1cf",
-                fg=TEXT,
-                activebackground="#dfd0b5",
-                activeforeground=TEXT,
+                **button_style("secondary"),
                 relief="flat",
+                bd=0,
                 padx=14,
                 pady=9,
                 font=("Segoe UI Semibold", 10),
@@ -878,11 +950,9 @@ class SavedAssetBrowserDialog:
             buttons,
             text="打开收藏目录",
             command=self._open_saved_dir,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -892,11 +962,9 @@ class SavedAssetBrowserDialog:
             buttons,
             text="刷新列表",
             command=self._load_items,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -906,11 +974,9 @@ class SavedAssetBrowserDialog:
             buttons,
             text="关闭",
             command=self.dialog.destroy,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -921,11 +987,9 @@ class SavedAssetBrowserDialog:
                 buttons,
                 text="使用这张素材",
                 command=self._confirm_pick,
-                bg=ACCENT,
-                fg="white",
-                activebackground="#173b37",
-                activeforeground="white",
+                **button_style("primary"),
                 relief="flat",
+                bd=0,
                 padx=16,
                 pady=9,
                 font=("Segoe UI Semibold", 10),
@@ -1000,10 +1064,7 @@ class SavedAssetBrowserDialog:
 
     def _open_saved_dir(self) -> None:
         saved_dir = self.studio.saved_assets_dir()
-        try:
-            os.startfile(str(saved_dir))  # type: ignore[attr-defined]
-        except AttributeError:
-            subprocess.run(["explorer", str(saved_dir)], check=False)
+        open_in_file_manager(saved_dir, parent=self.dialog)
 
     def _confirm_pick(self) -> None:
         selection = self.saved_tree.selection()
@@ -1159,11 +1220,9 @@ class SavedAssetBrowserDialog:
             buttons,
             text="从电脑导入",
             command=self._import_from_computer,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -1172,11 +1231,9 @@ class SavedAssetBrowserDialog:
             buttons,
             text="编辑备注",
             command=self._edit_note,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -1185,11 +1242,9 @@ class SavedAssetBrowserDialog:
             buttons,
             text="1888 降色",
             command=self._resize_selected_saved_asset,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -1198,11 +1253,9 @@ class SavedAssetBrowserDialog:
             buttons,
             text="1888 闄嶈壊",
             command=self._reduce_selected_saved_asset,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -1211,11 +1264,9 @@ class SavedAssetBrowserDialog:
             buttons,
             text="删除收藏",
             command=self._delete_selected,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -1224,11 +1275,9 @@ class SavedAssetBrowserDialog:
             buttons,
             text="打开收藏目录",
             command=self._open_saved_dir,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -1237,11 +1286,9 @@ class SavedAssetBrowserDialog:
             buttons,
             text="刷新列表",
             command=self._load_items,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -1250,11 +1297,9 @@ class SavedAssetBrowserDialog:
             buttons,
             text="关闭",
             command=self.dialog.destroy,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -1265,11 +1310,9 @@ class SavedAssetBrowserDialog:
                 buttons,
                 text="使用这张素材",
                 command=self._confirm_pick,
-                bg=ACCENT,
-                fg="white",
-                activebackground="#173b37",
-                activeforeground="white",
+                **button_style("primary"),
                 relief="flat",
+                bd=0,
                 padx=16,
                 pady=9,
                 font=("Segoe UI Semibold", 10),
@@ -1441,10 +1484,7 @@ class SavedAssetBrowserDialog:
 
     def _open_saved_dir(self) -> None:
         saved_dir = self.studio.saved_assets_dir()
-        try:
-            os.startfile(str(saved_dir))  # type: ignore[attr-defined]
-        except AttributeError:
-            subprocess.run(["explorer", str(saved_dir)], check=False)
+        open_in_file_manager(saved_dir, parent=self.dialog)
 
     def _confirm_pick(self) -> None:
         path = self._selected_path()
@@ -1618,11 +1658,9 @@ class SavedAssetBrowserDialog:
                 left_actions,
                 text=label,
                 command=command,
-                bg="#ebe1cf",
-                fg=TEXT,
-                activebackground="#dfd0b5",
-                activeforeground=TEXT,
+                **button_style("secondary"),
                 relief="flat",
+                bd=0,
                 padx=14,
                 pady=9,
                 font=("Segoe UI Semibold", 10),
@@ -1632,11 +1670,9 @@ class SavedAssetBrowserDialog:
             right_actions,
             text="关闭",
             command=self.dialog.destroy,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=14,
             pady=9,
             font=("Segoe UI Semibold", 10),
@@ -1647,11 +1683,9 @@ class SavedAssetBrowserDialog:
                 right_actions,
                 text="使用这张素材",
                 command=self._confirm_pick,
-                bg=ACCENT,
-                fg="white",
-                activebackground="#173b37",
-                activeforeground="white",
+                **button_style("primary"),
                 relief="flat",
+                bd=0,
                 padx=16,
                 pady=9,
                 font=("Segoe UI Semibold", 10),
@@ -1819,10 +1853,7 @@ class SavedAssetBrowserDialog:
 
     def _open_saved_dir(self) -> None:
         saved_dir = self.studio.saved_assets_dir()
-        try:
-            os.startfile(str(saved_dir))  # type: ignore[attr-defined]
-        except AttributeError:
-            subprocess.run(["explorer", str(saved_dir)], check=False)
+        open_in_file_manager(saved_dir, parent=self.dialog)
 
     def _confirm_pick(self) -> None:
         path = self._selected_path()
@@ -1841,9 +1872,12 @@ class ThemeStudioApp:
     def __init__(self) -> None:
         self.studio = ThemeStudio()
         self.root = tk.Tk()
+        if IS_MACOS:
+            self.root.tk.call("tk", "scaling", 1.12)
+        self.root.option_add("*tearOff", False)
         self.root.title("iPod Theme Studio")
-        self.root.geometry("1380x860")
-        self.root.minsize(1180, 760)
+        self.root.geometry("1500x900")
+        self.root.minsize(1260, 760)
         self.root.configure(bg=BG)
         self.app_icon_image: ImageTk.PhotoImage | None = None
         self.header_icon_image: ImageTk.PhotoImage | None = None
@@ -1875,13 +1909,13 @@ class ThemeStudioApp:
         style.theme_use("clam")
         style.configure("TFrame", background=BG)
         style.configure("Card.TFrame", background=CARD)
-        style.configure("Title.TLabel", background=BG, foreground=TEXT, font=("Segoe UI Semibold", 20))
-        style.configure("Body.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI", 10))
-        style.configure("Muted.TLabel", background=CARD, foreground=MUTED, font=("Segoe UI", 10))
-        style.configure("Header.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI Semibold", 12))
-        style.configure("Accent.TButton", font=("Segoe UI Semibold", 10))
-        style.configure("Treeview", font=("Consolas", 10), rowheight=26)
-        style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10))
+        style.configure("Title.TLabel", background=BG, foreground=TEXT, font=ui_font(24, bold=True))
+        style.configure("Body.TLabel", background=CARD, foreground=TEXT, font=ui_font(12))
+        style.configure("Muted.TLabel", background=CARD, foreground=MUTED, font=ui_font(11))
+        style.configure("Header.TLabel", background=CARD, foreground=TEXT, font=ui_font(14, bold=True))
+        style.configure("Treeview", font=mono_font(11), rowheight=30, fieldbackground=CARD, background=CARD, foreground=TEXT)
+        style.configure("Treeview.Heading", font=ui_font(11, bold=True), background=SOFT_BG, foreground=TEXT)
+        style.map("Treeview", background=[("selected", ACCENT_LIGHT)], foreground=[("selected", TEXT)])
 
     def _load_app_icon(self) -> None:
         if APP_ICON_PNG.exists():
@@ -1897,7 +1931,7 @@ class ThemeStudioApp:
                 self.app_icon_image = None
                 self.header_icon_image = None
 
-        if APP_ICON_ICO.exists():
+        if IS_WINDOWS and APP_ICON_ICO.exists():
             try:
                 self.root.iconbitmap(str(APP_ICON_ICO))
             except Exception:
@@ -1950,13 +1984,14 @@ class ThemeStudioApp:
             text="把官方或社区 IPSW 变成适合小白使用的素材替换工作台",
             bg=BG,
             fg=MUTED,
-            font=("Segoe UI", 11),
+            font=ui_font(12),
         )
         subtitle.pack(side="left", padx=(14, 0), pady=(8, 0))
 
         body = ttk.Frame(outer)
         body.pack(fill="both", expand=True, pady=(16, 0))
         body.columnconfigure(0, weight=0)
+        body.columnconfigure(0, minsize=320 if not IS_MACOS else 296)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
 
@@ -1964,8 +1999,27 @@ class ThemeStudioApp:
         self._build_workspace(body)
 
     def _build_sidebar(self, parent: ttk.Frame) -> None:
-        sidebar = ttk.Frame(parent, style="Card.TFrame", padding=16)
-        sidebar.grid(row=0, column=0, sticky="nsw")
+        sidebar_card = ttk.Frame(parent, style="Card.TFrame", padding=0)
+        sidebar_card.grid(row=0, column=0, sticky="nsew")
+        sidebar_card.columnconfigure(0, weight=1)
+        sidebar_card.rowconfigure(0, weight=1)
+
+        sidebar_scroll = ttk.Scrollbar(sidebar_card, orient="vertical")
+        sidebar_scroll.grid(row=0, column=1, sticky="ns")
+
+        self.sidebar_canvas = tk.Canvas(
+            sidebar_card,
+            bg=CARD,
+            highlightthickness=0,
+            yscrollcommand=sidebar_scroll.set,
+        )
+        self.sidebar_canvas.grid(row=0, column=0, sticky="nsew")
+        sidebar_scroll.configure(command=self.sidebar_canvas.yview)
+
+        sidebar = ttk.Frame(self.sidebar_canvas, style="Card.TFrame", padding=16)
+        self.sidebar_canvas_window = self.sidebar_canvas.create_window((0, 0), window=sidebar, anchor="nw")
+        sidebar.bind("<Configure>", self._sync_sidebar_scroll_region)
+        self.sidebar_canvas.bind("<Configure>", self._resize_sidebar_panel)
 
         ttk.Label(sidebar, text="工作流", style="Header.TLabel").pack(anchor="w")
 
@@ -1975,70 +2029,72 @@ class ThemeStudioApp:
             textvariable=self.device_var,
             state="readonly",
             values=["nano6", "nano7-2012", "nano7-2015"],
-            width=22,
+            width=24,
         )
         device_box.pack(anchor="w", fill="x")
         device_box.bind("<<ComboboxSelected>>", self._on_device_changed)
 
-        tips = tk.Label(
+        self.sidebar_tips_label = tk.Label(
             sidebar,
             text="推荐先做官方固件流程，再决定是否导入社区 IPSW。",
             bg=CARD,
             fg=MUTED,
             justify="left",
-            wraplength=250,
-            font=("Segoe UI", 10),
+            wraplength=286,
+            font=ui_font(11),
         )
-        tips.pack(anchor="w", pady=(12, 18))
+        self.sidebar_tips_label.pack(anchor="w", pady=(12, 18))
 
         self._add_sidebar_button(sidebar, "下载官方 IPSW 备份", self._download_official_backup)
-        self._add_sidebar_button(sidebar, "加载官方固件并解包", self._import_official)
+        self._add_sidebar_button(sidebar, "加载官方固件并解包", self._import_official, variant="primary")
         self._add_sidebar_button(sidebar, "导入社区 IPSW", self._import_community_ipsw)
         self._add_sidebar_button(sidebar, "打开 body 目录", self._open_body_dir)
         self._add_sidebar_button(sidebar, "查看已保存素材", self._show_saved_assets)
         self._add_sidebar_button(sidebar, "重新扫描素材列表", self._refresh_assets)
-        self._add_sidebar_button(sidebar, "生成修改后的 IPSW", self._build_ipsw)
+        self._add_sidebar_button(sidebar, "生成修改后的 IPSW", self._build_ipsw, variant="primary")
         self._add_sidebar_button(sidebar, "关于与版权", self._show_about)
 
-        status_card = tk.Frame(sidebar, bg=ACCENT, padx=14, pady=14)
+        status_card = tk.Frame(sidebar, bg=STATUS_BG, padx=16, pady=16, highlightthickness=1, highlightbackground="#244d86")
         status_card.pack(fill="x", pady=(18, 0))
 
         tk.Label(
             status_card,
             text="当前状态",
-            bg=ACCENT,
-            fg="#d9f7ef",
-            font=("Segoe UI Semibold", 12),
+            bg=STATUS_BG,
+            fg=STATUS_TEXT,
+            font=ui_font(13, bold=True),
         ).pack(anchor="w")
-        tk.Label(
+        self.sidebar_status_label = tk.Label(
             status_card,
             textvariable=self.status_var,
-            bg=ACCENT,
+            bg=STATUS_BG,
             fg="white",
             justify="left",
-            wraplength=240,
-            font=("Segoe UI", 10),
-        ).pack(anchor="w", pady=(8, 0))
+            wraplength=286,
+            font=ui_font(11),
+        )
+        self.sidebar_status_label.pack(anchor="w", pady=(8, 0))
 
-        capacity_card = tk.Frame(sidebar, bg="#efe6d5", padx=12, pady=12)
+        capacity_card = tk.Frame(sidebar, bg=SOFT_BG, padx=14, pady=14, highlightthickness=1, highlightbackground=BORDER)
         capacity_card.pack(fill="x", pady=(12, 0))
 
         tk.Label(
             capacity_card,
             text="容量提醒",
-            bg="#efe6d5",
+            bg=SOFT_BG,
             fg=TEXT,
-            font=("Segoe UI Semibold", 11),
+            font=ui_font(12, bold=True),
         ).pack(anchor="w")
-        tk.Label(
+        self.capacity_label = tk.Label(
             capacity_card,
             textvariable=self.capacity_var,
-            bg="#efe6d5",
+            bg=SOFT_BG,
             fg=TEXT,
             justify="left",
-            wraplength=244,
-            font=("Segoe UI", 9),
-        ).pack(anchor="w", pady=(8, 0))
+            wraplength=286,
+            font=ui_font(10),
+        )
+        self.capacity_label.pack(anchor="w", pady=(8, 0))
 
     def _build_workspace(self, parent: ttk.Frame) -> None:
         workspace = ttk.Frame(parent)
@@ -2046,7 +2102,7 @@ class ThemeStudioApp:
         workspace.rowconfigure(1, weight=1)
         workspace.rowconfigure(2, weight=0)
         workspace.columnconfigure(0, weight=1)
-        workspace.columnconfigure(1, weight=0)
+        workspace.columnconfigure(1, weight=4 if IS_MACOS else 0)
 
         header = ttk.Frame(workspace, style="Card.TFrame", padding=16)
         header.grid(row=0, column=0, columnspan=2, sticky="ew")
@@ -2056,7 +2112,7 @@ class ThemeStudioApp:
             textvariable=self.source_var,
             bg=CARD,
             fg=TEXT,
-            font=("Segoe UI Semibold", 12),
+            font=ui_font(13, bold=True),
         ).pack(anchor="w")
         tk.Label(
             header,
@@ -2065,7 +2121,7 @@ class ThemeStudioApp:
             fg=MUTED,
             justify="left",
             wraplength=950,
-            font=("Segoe UI", 10),
+            font=ui_font(11),
         ).pack(anchor="w", pady=(8, 0))
 
         list_card = ttk.Frame(workspace, style="Card.TFrame", padding=12)
@@ -2084,7 +2140,7 @@ class ThemeStudioApp:
             text="快捷分组",
             bg=CARD,
             fg=TEXT,
-            font=("Segoe UI Semibold", 10),
+            font=ui_font(11, bold=True),
         ).grid(row=0, column=0, sticky="w", padx=(0, 8))
 
         self.group_box = ttk.Combobox(
@@ -2103,11 +2159,11 @@ class ThemeStudioApp:
         self.asset_tree.heading("size", text="尺寸")
         self.asset_tree.heading("group", text="分组")
         self.asset_tree.heading("name", text="文件名")
-        self.asset_tree.column("id", width=110, anchor="w")
-        self.asset_tree.column("format", width=90, anchor="center")
-        self.asset_tree.column("size", width=110, anchor="center")
-        self.asset_tree.column("group", width=170, anchor="w")
-        self.asset_tree.column("name", width=250, anchor="w")
+        self.asset_tree.column("id", width=92, minwidth=82, stretch=False, anchor="w")
+        self.asset_tree.column("format", width=72, minwidth=64, stretch=False, anchor="center")
+        self.asset_tree.column("size", width=88, minwidth=78, stretch=False, anchor="center")
+        self.asset_tree.column("group", width=132, minwidth=112, stretch=False, anchor="w")
+        self.asset_tree.column("name", width=180, minwidth=140, stretch=True, anchor="w")
         self.asset_tree.grid(row=2, column=0, sticky="nsew")
         self.asset_tree.bind("<<TreeviewSelect>>", self._on_asset_selected)
 
@@ -2147,7 +2203,7 @@ class ThemeStudioApp:
             self.preview_panel,
             width=PREVIEW_CANVAS_WIDTH,
             height=PREVIEW_CANVAS_HEIGHT,
-            bg=ACCENT_LIGHT,
+            bg=SOFT_BG,
             highlightthickness=0,
             relief="flat",
         )
@@ -2157,7 +2213,7 @@ class ThemeStudioApp:
             PREVIEW_CANVAS_HEIGHT // 2,
             text="暂无预览",
             fill=MUTED,
-            font=("Segoe UI", 11),
+            font=ui_font(12),
         )
 
         self.meta_label = tk.Label(
@@ -2167,7 +2223,7 @@ class ThemeStudioApp:
             justify="left",
             anchor="w",
             wraplength=330,
-            font=("Consolas", 10),
+            font=mono_font(11),
         )
         self.meta_label.grid(row=2, column=0, sticky="ew")
 
@@ -2178,7 +2234,7 @@ class ThemeStudioApp:
             fg=MUTED,
             justify="left",
             wraplength=330,
-            font=("Segoe UI", 10),
+            font=ui_font(11),
         ).grid(row=3, column=0, sticky="ew", pady=(10, 12))
 
         action_row = tk.Frame(self.preview_panel, bg=CARD)
@@ -2190,14 +2246,12 @@ class ThemeStudioApp:
             action_row,
             text="替换当前素材",
             command=self._replace_current_asset,
-            bg=ACCENT,
-            fg="white",
-            activebackground="#173b37",
-            activeforeground="white",
+            **button_style("primary"),
             relief="flat",
+            bd=0,
             padx=16,
-            pady=10,
-            font=("Segoe UI Semibold", 10),
+            pady=12,
+            font=ui_font(11, bold=True),
         )
         replace_btn.grid(row=0, column=0, sticky="ew")
 
@@ -2205,14 +2259,12 @@ class ThemeStudioApp:
             action_row,
             text="保存当前素材",
             command=self._save_current_asset,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=16,
-            pady=10,
-            font=("Segoe UI Semibold", 10),
+            pady=12,
+            font=ui_font(11, bold=True),
         )
         save_btn.grid(row=0, column=1, sticky="ew", padx=(10, 0))
 
@@ -2220,14 +2272,12 @@ class ThemeStudioApp:
             action_row,
             text="对当前 1888 降色",
             command=self._reduce_color_and_replace,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style("secondary"),
             relief="flat",
+            bd=0,
             padx=16,
-            pady=10,
-            font=("Segoe UI Semibold", 10),
+            pady=12,
+            font=ui_font(11, bold=True),
         )
         reduce_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
@@ -2239,31 +2289,29 @@ class ThemeStudioApp:
         self.log_text = tk.Text(
             log_card,
             height=10,
-            bg="#112724",
-            fg="#dcf5ef",
-            insertbackground="#dcf5ef",
+            bg=LOG_BG,
+            fg=LOG_TEXT,
+            insertbackground=LOG_TEXT,
             relief="flat",
-            font=("Consolas", 10),
+            font=mono_font(11),
             padx=10,
             pady=10,
         )
         self.log_text.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         self.log_text.configure(state="disabled")
 
-    def _add_sidebar_button(self, parent: ttk.Frame, text: str, command) -> None:
+    def _add_sidebar_button(self, parent: ttk.Frame, text: str, command, variant: str = "secondary") -> None:
         button = tk.Button(
             parent,
             text=text,
             command=command,
-            bg="#ebe1cf",
-            fg=TEXT,
-            activebackground="#dfd0b5",
-            activeforeground=TEXT,
+            **button_style(variant),
             relief="flat",
             anchor="w",
-            padx=12,
-            pady=10,
-            font=("Segoe UI Semibold", 10),
+            bd=0,
+            padx=14,
+            pady=12 if IS_MACOS else 10,
+            font=ui_font(11 if IS_MACOS else 10, bold=True),
         )
         button.pack(fill="x", pady=4)
 
@@ -2519,10 +2567,7 @@ class ThemeStudioApp:
             messagebox.showinfo("还没有素材目录", "请先导入官方固件或社区 IPSW。")
             return
 
-        try:
-            os.startfile(str(body_dir))  # type: ignore[attr-defined]
-        except AttributeError:
-            subprocess.run(["explorer", str(body_dir)], check=False)
+        open_in_file_manager(body_dir, parent=self.root)
 
     def _clear_preview(self) -> None:
         self.preview_image = None
@@ -2536,6 +2581,20 @@ class ThemeStudioApp:
 
     def _resize_preview_panel(self, event) -> None:
         self.preview_panel_canvas.itemconfigure(self.preview_panel_canvas_window, width=event.width)
+
+    def _sync_sidebar_scroll_region(self, _event=None) -> None:
+        self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all"))
+
+    def _resize_sidebar_panel(self, event) -> None:
+        panel_width = max(int(event.width), 1)
+        self.sidebar_canvas.itemconfigure(self.sidebar_canvas_window, width=panel_width)
+
+        outer_wrap = max(180, panel_width - 42)
+        card_wrap = max(160, panel_width - 78)
+
+        self.sidebar_tips_label.configure(wraplength=outer_wrap)
+        self.sidebar_status_label.configure(wraplength=card_wrap)
+        self.capacity_label.configure(wraplength=card_wrap)
 
     def _draw_preview(self) -> None:
         if self.preview_image is None:
@@ -2560,12 +2619,7 @@ class ThemeStudioApp:
 
         path = filedialog.askopenfilename(
             title="选择要替换进去的图片",
-            filetypes=[
-                ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
-                ("PNG image", "*.png"),
-                ("JPEG image", "*.jpg;*.jpeg"),
-                ("All files", "*.*"),
-            ],
+            filetypes=IMAGE_FILE_TYPES,
         )
         if not path:
             return
@@ -2699,12 +2753,7 @@ class ThemeStudioApp:
         if source_choice:
             path = filedialog.askopenfilename(
                 title="选择要替换进去的图片",
-                filetypes=[
-                    ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
-                    ("PNG image", "*.png"),
-                    ("JPEG image", "*.jpg;*.jpeg"),
-                    ("All files", "*.*"),
-                ],
+                filetypes=IMAGE_FILE_TYPES,
             )
             return Path(path) if path else None
         return self._pick_saved_asset()
@@ -2776,12 +2825,7 @@ class ThemeStudioApp:
     def _import_file_to_saved_assets(self) -> Path | None:
         path = filedialog.askopenfilename(
             title="选择要导入到素材库的图片",
-            filetypes=[
-                ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
-                ("PNG image", "*.png"),
-                ("JPEG image", "*.jpg;*.jpeg"),
-                ("All files", "*.*"),
-            ],
+            filetypes=IMAGE_FILE_TYPES,
         )
         if not path:
             return None
@@ -3356,12 +3400,7 @@ class ThemeStudioApp:
         if source_choice:
             path = filedialog.askopenfilename(
                 title="选择要替换进去的图片",
-                filetypes=[
-                    ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
-                    ("PNG image", "*.png"),
-                    ("JPEG image", "*.jpg;*.jpeg"),
-                    ("All files", "*.*"),
-                ],
+                filetypes=IMAGE_FILE_TYPES,
             )
             return Path(path) if path else None
 
@@ -3619,12 +3658,7 @@ def _theme_studio_choose_replacement_candidate(self) -> Path | None:
     if choice == "computer":
         path = filedialog.askopenfilename(
             title="选择要替换进去的图片",
-            filetypes=[
-                ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
-                ("PNG image", "*.png"),
-                ("JPEG image", "*.jpg;*.jpeg"),
-                ("All files", "*.*"),
-            ],
+            filetypes=IMAGE_FILE_TYPES,
         )
         return Path(path) if path else None
 
@@ -3639,20 +3673,104 @@ def _theme_studio_choose_replacement_candidate(self) -> Path | None:
     return picked
 
 
-def _theme_studio_import_file_to_saved_assets(self) -> Path | None:
-    path = filedialog.askopenfilename(
-        title="选择要导入到素材库的图片",
-        filetypes=[
-            ("Image files", "*.png;*.jpg;*.jpeg;*.webp;*.bmp"),
-            ("PNG image", "*.png"),
-            ("JPEG image", "*.jpg;*.jpeg"),
-            ("All files", "*.*"),
+def _theme_studio_import_multiple_saved_assets(self, sources: list[Path]) -> Path | None:
+    choice = ActionChoiceDialog(
+        self.root,
+        "批量导入方式",
+        f"已选择 {len(sources)} 张图片。\n\n请选择这次批量导入的处理方式。",
+        [
+            ("resize", "统一尺寸，逐张裁剪后导入", True),
+            ("direct", "全部原图直接保存", False),
+            ("cancel", "取消", False),
         ],
-    )
-    if not path:
+    ).show()
+    if choice in {None, "cancel"}:
         return None
 
-    source = Path(path)
+    target_size: tuple[int, int] | None = None
+    if choice == "resize":
+        target_size = self._ask_target_size()
+        if target_size is None:
+            return None
+
+    imported_paths: list[Path] = []
+    skipped_names: list[str] = []
+    stopped_early = False
+
+    for index, source in enumerate(sources, start=1):
+        candidate = source
+
+        if choice == "resize":
+            cropped = self._open_crop_dialog(
+                source,
+                f"批量导入 {index}/{len(sources)} - {source.name}",
+                target_size,
+            )
+            if cropped is None:
+                next_step = ActionChoiceDialog(
+                    self.root,
+                    "当前图片未导入",
+                    f"第 {index}/{len(sources)} 张没有完成裁剪：\n\n{source.name}\n\n接下来怎么处理？",
+                    [
+                        ("skip", "跳过这一张", True),
+                        ("stop", "停止剩余导入", False),
+                    ],
+                ).show()
+                if next_step == "skip":
+                    skipped_names.append(source.name)
+                    continue
+                stopped_early = True
+                break
+            candidate = cropped
+
+        try:
+            saved_path = self.studio.import_saved_asset(candidate, note="", preferred_name=source.name)
+        except StudioError as exc:
+            next_step = ActionChoiceDialog(
+                self.root,
+                "导入失败",
+                f"这张图片导入失败：\n\n{source.name}\n\n{exc}\n\n接下来怎么处理？",
+                [
+                    ("skip", "跳过这一张", True),
+                    ("stop", "停止剩余导入", False),
+                ],
+            ).show()
+            if next_step == "skip":
+                skipped_names.append(source.name)
+                continue
+            stopped_early = True
+            break
+
+        imported_paths.append(saved_path)
+        self._append_log("log", f"已导入收藏素材：{saved_path.name}")
+
+    if imported_paths:
+        summary_lines = [f"本次已导入 {len(imported_paths)} 张素材。"]
+        if skipped_names:
+            summary_lines.append(f"跳过 {len(skipped_names)} 张。")
+        if stopped_early:
+            summary_lines.append("已提前停止剩余导入。")
+        messagebox.showinfo("批量导入完成", "\n".join(summary_lines), parent=self.root)
+        return imported_paths[-1]
+
+    if skipped_names or stopped_early:
+        messagebox.showinfo("没有导入新素材", "这次批量导入没有新增素材。", parent=self.root)
+    return None
+
+
+def _theme_studio_import_file_to_saved_assets(self) -> Path | None:
+    paths = filedialog.askopenfilenames(
+        title="选择要导入到素材库的图片",
+        filetypes=IMAGE_FILE_TYPES,
+    )
+    if not paths:
+        return None
+
+    sources = [Path(path) for path in paths]
+    if len(sources) > 1:
+        return _theme_studio_import_multiple_saved_assets(self, sources)
+
+    source = sources[0]
     note = self._ask_saved_asset_note(source.stem)
     if note is None:
         return None
@@ -3807,7 +3925,7 @@ def _theme_studio_show_about(self) -> None:
         text="关于 iPod Theme Studio",
         bg=CARD,
         fg=TEXT,
-        font=("Segoe UI Semibold", 18),
+        font=ui_font(20, bold=True),
     ).pack(anchor="w")
 
     body_text = (
@@ -3829,7 +3947,7 @@ def _theme_studio_show_about(self) -> None:
         fg=TEXT,
         justify="left",
         wraplength=640,
-        font=("Segoe UI", 10),
+        font=ui_font(11),
     ).pack(anchor="w", pady=(14, 18))
 
     button_row = tk.Frame(container, bg=CARD)
@@ -3839,42 +3957,36 @@ def _theme_studio_show_about(self) -> None:
         button_row,
         text="打开本项目主页",
         command=lambda: webbrowser.open("https://github.com/wxhwxhwxh2002/ipod_theme_studio"),
-        bg=ACCENT,
-        fg="white",
-        activebackground="#173b37",
-        activeforeground="white",
+        **button_style("primary"),
         relief="flat",
+        bd=0,
         padx=14,
-        pady=8,
-        font=("Segoe UI Semibold", 10),
+        pady=10,
+        font=ui_font(11, bold=True),
     ).pack(side="left")
 
     tk.Button(
         button_row,
         text="打开上游项目",
         command=lambda: webbrowser.open("https://github.com/nfzerox/ipod_theme"),
-        bg="#ebe1cf",
-        fg=TEXT,
-        activebackground="#dfd0b5",
-        activeforeground=TEXT,
+        **button_style("secondary"),
         relief="flat",
+        bd=0,
         padx=14,
-        pady=8,
-        font=("Segoe UI Semibold", 10),
+        pady=10,
+        font=ui_font(11, bold=True),
     ).pack(side="left", padx=(10, 0))
 
     tk.Button(
         button_row,
         text="关闭",
         command=dialog.destroy,
-        bg="#ebe1cf",
-        fg=TEXT,
-        activebackground="#dfd0b5",
-        activeforeground=TEXT,
+        **button_style("secondary"),
         relief="flat",
+        bd=0,
         padx=14,
-        pady=8,
-        font=("Segoe UI Semibold", 10),
+        pady=10,
+        font=ui_font(11, bold=True),
     ).pack(side="right")
 
 

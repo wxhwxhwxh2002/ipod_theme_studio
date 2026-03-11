@@ -11,7 +11,7 @@
 - 新增桌面图形界面入口 [theme_studio.py](theme_studio.py)
 - 新增核心工作流封装 [theme_studio_core.py](theme_studio_core.py)
 - 新增 Windows 启动脚本 [run_theme_studio.bat](run_theme_studio.bat)
-- 新增 Windows 启动脚本 [run_theme_studio.bat](run_theme_studio.bat)
+- 新增 macOS 启动脚本 [run_theme_studio.command](run_theme_studio.command)
 - 新增便携整合包构建脚本 [build_portable_bundle.bat](build_portable_bundle.bat)，可以生成自带 Python 运行时的免安装目录
 - 改善了素材预览、Nano 7 素材分组跳转、以及 `_1888` 升格后的容量风险提醒
 - 内置大图裁剪 / 缩放流程，替换壁纸时可以直接在 GUI 里完成取景
@@ -56,6 +56,8 @@
 
 整合包目录本身主要用于网盘或压缩包分发，不直接提交到仓库。
 
+对于 macOS，目前更推荐继续使用已经准备好的 Python / conda 环境直接运行源码版 GUI；真正的免安装 `.app` 方案暂时还没有纳入这个仓库。
+
 ## 当前还没完全做完的部分
 
 这一版 GUI 目前重点还是 artwork 工作流，下面这些方向还可以继续做：
@@ -74,10 +76,23 @@
 python theme_studio.py
 ```
 
-或者直接双击：
+如果你已经准备好了 `ipod_theme` conda 环境，也可以这样启动：
+
+```powershell
+conda activate ipod_theme
+python theme_studio.py
+```
+
+Windows 可以直接双击：
 
 ```powershell
 run_theme_studio.bat
+```
+
+macOS 可以直接双击：
+
+```powershell
+run_theme_studio.command
 ```
 
 ## Python 依赖

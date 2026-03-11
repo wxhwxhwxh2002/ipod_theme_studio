@@ -22,12 +22,13 @@ This fork repositions the project as `iPod Theme Studio`: a friendlier desktop-o
 
 - Added `theme_studio.py`, a desktop GUI for browsing, previewing, replacing, and repacking artwork
 - Added `theme_studio_core.py`, which wraps the unpack/replace/repack workflow for official firmware and community IPSW files
-- Added Windows-friendly launch/build helpers, including `run_theme_studio.bat` for source-based local runs
+- Added source launch helpers for desktop use, including `run_theme_studio.bat` on Windows and `run_theme_studio.command` on macOS
 - Added a portable bundle workflow through `build_portable_bundle.bat`, so Windows users can ship a no-install folder with a bundled Python runtime
 - Added artwork preview improvements, Nano 7 quick grouping shortcuts, and basic capacity-risk reminders for assets promoted to `_1888`
 - Added built-in crop / resize flow for oversized images, with higher-quality downscaling for wallpaper replacement
 - Added manual reduction preview and strategy selection for turning `1888` artwork into `0064` or `0065`
 - Added a saved artwork library with search, notes, delete, import-from-computer, reuse-in-replacement, and manual `1888` reduction tools
+- Added batch import into the saved artwork library, with optional shared target size and per-image crop flow
 - Added direct format detection for saved assets, so imported images show an inferred format even when the filename does not contain an artwork suffix
 - Added an About page in the GUI with upstream attribution and GPL-3.0 notice
 - Improved Windows Python handling in `src/main.rs` so unpacking is more reliable when using a venv or conda environment
@@ -47,6 +48,7 @@ The current GUI is focused on artwork workflows:
 - Preview reduction results with different strategies before committing
 - Save current artwork into a reusable local library
 - Import outside images into the saved library, either as-is or after cropping / resizing
+- Batch-import multiple outside images into the saved library, either directly or with one shared target size plus per-image cropping
 - Search the saved library by filename or note, edit notes, delete saved items, and reuse saved assets as replacement sources
 - Manually reduce saved-library `1888` assets to lower-color formats
 - Repack a modified IPSW for flashing through iTunes / Apple Devices
@@ -61,6 +63,8 @@ This fork now also supports a Windows-friendly portable distribution model for n
 - The GUI workflow in this portable bundle does not require Rust, Cargo, or `arm-none-eabi-gcc`
 
 The bundle itself is intended for release archives or cloud-drive sharing and is not committed into the repo.
+
+For macOS, the recommended path is still to run from source inside a prepared Python/conda environment. A true drag-and-drop portable app bundle is not included yet.
 
 The original CLI tutorial below is still the authoritative upstream workflow and remains available as-is.
 
@@ -132,6 +136,15 @@ For MacOS and Linux:
 ```shell
 export PIP_BREAK_SYSTEM_PACKAGES=1 && pip3 install fs pyfatfs fonttools pillow numpy opencv-python-headless
 ```
+
+If you already have the `ipod_theme` conda environment, you can launch the GUI with:
+
+```shell
+conda activate ipod_theme
+python theme_studio.py
+```
+
+On macOS you can also double-click `run_theme_studio.command`. On Windows, use `run_theme_studio.bat`.
 
 For Windows, execute and close terminal:
 ```shell
