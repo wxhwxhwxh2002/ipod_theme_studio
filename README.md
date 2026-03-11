@@ -350,7 +350,26 @@ Connect your iPod to your computer. Before flashing custom firmware, back up you
 
 On macOS, press `Command`+`Shift`+`.` to show hidden files. On Linux, press `Ctrl`+`H` (command may differ depending on distro) to show hidden files. On Windows, use View > Show > Hidden items to show hidden files. Make sure you can see the hidden `iPod_Control` folder which contains all your media, then copy everything from your iPod to a new folder on your computer.
 
-Select your iPod in the sidebar of Finder or iTunes. If you are running Linux, you can use a Windows virtual machine and connect your iPod to the virtual machine. Hold down the Option key (Mac), or Shift key (Windows) and click Check for Update, then choose the repacked custom ipsw firmware from step 7.
+For Windows:
+
+1. Install and open iTunes.
+2. Connect your iPod nano and wait for iTunes to detect it.
+3. Click the small iPod device icon near the upper-left area of the iTunes window to open the device summary page.
+4. Find the `Check for Update` button.
+5. Hold the `Shift` key and click `Check for Update`.
+6. Choose the repacked custom `.ipsw` firmware from step 7.
+7. Confirm the update and wait for iTunes to finish.
+
+For macOS:
+
+1. Connect your iPod nano.
+2. Open Finder and select your iPod in the sidebar.
+3. Find the `Check for Update` button on the device page.
+4. Hold the `Option` key and click `Check for Update`.
+5. Choose the repacked custom `.ipsw` firmware from step 7.
+6. Confirm the update and wait for Finder to finish.
+
+If you are running Linux, use a Windows virtual machine and connect your iPod to the virtual machine. In normal cases, prefer `Check for Update` instead of `Restore iPod`.
 
 After your iPod finishes updating, you should see your custom artwork. To see your custom translations or hidden app labels, open Settings > General > Language > Select any language you have edited > Save.
 
