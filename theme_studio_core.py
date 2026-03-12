@@ -364,6 +364,49 @@ def _format_bytes(size: int) -> str:
     return f"{size / (1024 * 1024):.2f} MB"
 
 
+def _silverdb_write_budget(rsrc_path: Path, packed_size: int) -> dict[str, int] | None:
+    if not rsrc_path.exists():
+        return None
+
+    fat = PyFatFS.PyFatFS(str(rsrc_path), read_only=False)
+    try:
+        fs = fat.fs
+        free_clus = fs.FAT_CLUSTER_VALUES[fs.fat_type]["FREE_CLUSTER"]
+        min_clus = fs.FAT_CLUSTER_VALUES[fs.fat_type]["MIN_DATA_CLUSTER"]
+        max_clus = fs.FAT_CLUSTER_VALUES[fs.fat_type]["MAX_DATA_CLUSTER"]
+        free_clusters = sum(
+            1
+            for index, value in enumerate(fs.fat)
+            if min_clus <= index <= max_clus and value == free_clus
+        )
+
+        bytes_per_cluster = fs.bytes_per_cluster
+        free_now = free_clusters * bytes_per_cluster
+
+        current_size = 0
+        try:
+            current_size = fat.getinfo("/Resources/UI/SilverImagesDB.LE.bin", namespaces=["details"]).size
+        except Exception:
+            current_size = 0
+
+        current_alloc = fs.calc_num_clusters(current_size) * bytes_per_cluster if current_size else 0
+        required_alloc = fs.calc_num_clusters(packed_size) * bytes_per_cluster if packed_size else 0
+        free_after_replace = free_now + current_alloc
+        remaining = free_after_replace - required_alloc
+
+        return {
+            "bytes_per_cluster": bytes_per_cluster,
+            "free_now": free_now,
+            "current_size": current_size,
+            "current_alloc": current_alloc,
+            "required_alloc": required_alloc,
+            "free_after_replace": free_after_replace,
+            "remaining": remaining,
+        }
+    finally:
+        fat.close()
+
+
 class ThemeStudio:
     def __init__(self, project_root: Path | None = None) -> None:
         self.project_root = Path(project_root) if project_root else PROJECT_ROOT
@@ -388,7 +431,7 @@ class ThemeStudio:
         profile = self.get_profile(device_key)
         backup_path = WORK_INPUTS / profile.official_ipsw_name
         if backup_path.exists():
-            log(f"官方固件备份已存在: {backup_path.name}")
+            log(f"官方固件备份已存在: {backup_path}")
             return backup_path
 
         log(f"下载官方固件: {profile.official_ipsw_url}")
@@ -557,16 +600,24 @@ class ThemeStudio:
     def capacity_summary(self, packed_size: int | None = None) -> str:
         inventory = self._load_inventory()
         current_items = self._scan_body_items()
+        budget = _silverdb_write_budget(WORK_RSRC_BASE, packed_size) if packed_size is not None else None
         if not inventory:
             if packed_size is None:
                 return "容量提醒：重新导入一次官方固件或社区 IPSW 后，才能更准确地追踪哪些素材被升级成了 1888。"
 
             original_size = WORK_SILVER.stat().st_size if WORK_SILVER.exists() else 0
             delta = packed_size - original_size
+            budget_note = ""
+            if budget:
+                remaining = budget["remaining"]
+                if remaining < 0:
+                    budget_note = f" 按当前 rsrc 分区容量估算，还差 {_format_bytes(-remaining)}，实际写回会失败。"
+                else:
+                    budget_note = f" 按当前 rsrc 分区容量估算，写回后还剩 {_format_bytes(remaining)}。"
             return (
-                f"容量提醒：原始 SilverImagesDB 为 {_format_bytes(original_size)}，"
+                f"原始 SilverImagesDB 为 {_format_bytes(original_size)}，"
                 f"当前为 {_format_bytes(packed_size)}，变化 {delta / (1024 * 1024):+.2f} MB。"
-                "由于当前工作区缺少初始素材清单，暂时无法统计 1888 升格数量。"
+                f"由于当前工作区缺少初始素材清单，暂时无法统计 1888 升格数量。{budget_note}"
             )
 
         inventory_map = {item["id"]: item for item in inventory}
@@ -588,7 +639,14 @@ class ThemeStudio:
 
         original_size = WORK_SILVER.stat().st_size if WORK_SILVER.exists() else 0
         delta = packed_size - original_size
-        if delta <= 0:
+        if budget and budget["remaining"] < 0:
+            risk = (
+                f"按当前 rsrc 分区容量估算，写回新的 SilverImagesDB 后还差 {_format_bytes(-budget['remaining'])}，"
+                "实际写回会失败。"
+            )
+        elif budget and budget["remaining"] < 512 * 1024:
+            risk = f"按当前 rsrc 分区容量估算，写回后只剩 {_format_bytes(budget['remaining'])}，已经非常接近上限。"
+        elif delta <= 0:
             risk = "当前打包后的 SilverImagesDB 没有比原始包更大。"
         elif delta < 512 * 1024:
             risk = "当前增量较小，但仍建议实际刷机前保留原始备份。"
@@ -598,10 +656,17 @@ class ThemeStudio:
             risk = "当前增量较大，已经属于高风险体积增长，建议减少 1888 大图替换。"
 
         promoted_suffix = f" 已升格到 1888 的素材数：{len(promoted)}。" if promoted else ""
+        budget_suffix = ""
+        if budget:
+            budget_suffix = (
+                f" rsrc 分区可用预算：写回时可用 {_format_bytes(budget['free_after_replace'])}，"
+                f"当前需要 {_format_bytes(budget['required_alloc'])}，"
+                f"余量 {budget['remaining'] / (1024 * 1024):+.2f} MB。"
+            )
         return (
-            f"容量提醒：原始 SilverImagesDB 为 {_format_bytes(original_size)}，"
+            f"原始 SilverImagesDB 为 {_format_bytes(original_size)}，"
             f"当前为 {_format_bytes(packed_size)}，变化 {delta / (1024 * 1024):+.2f} MB。"
-            f"{risk}{promoted_suffix}"
+            f"{risk}{promoted_suffix}{budget_suffix}"
         )
 
     def validate_replacement(self, target_name: str, candidate_path: Path) -> tuple[str, list[str]]:
@@ -793,6 +858,15 @@ class ThemeStudio:
                 pack_silverdb(stream, WORK_BODY)
         log(f"已生成 {WORK_SILVER_PACKED.name}")
         return WORK_SILVER_PACKED
+
+    def estimate_packed_silverdb_size(self) -> int:
+        if not WORK_BODY.exists():
+            raise StudioError("还没有可打包的 body 目录。")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            stream = io.BytesIO()
+            pack_silverdb(stream, WORK_BODY)
+        return len(stream.getbuffer())
 
     def build_ipsw(self, output_path: Path, log: LogFn) -> Path:
         session = self.load_session()

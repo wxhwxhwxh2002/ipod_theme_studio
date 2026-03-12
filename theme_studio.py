@@ -146,6 +146,17 @@ def lower_format_actions(direct_format: str) -> list[tuple[str, str, bool]]:
     ]
 
 
+def natural_low_color_hint(image_format: str) -> str:
+    if image_format in {"0064", "0065"}:
+        return (
+            f"\n\n这通常表示缩放后的颜色数自然落入 {image_format} 范围，"
+            "并不是额外做了强制降色；视觉上一般不会比 1888 少，但体积通常更省。"
+        )
+    if image_format == "0565":
+        return "\n\n这通常表示当前图片已经接近 RGB565 色阶，继续写回该格式会更省空间。"
+    return ""
+
+
 def button_style(variant: str = "secondary") -> dict[str, object]:
     if variant == "primary":
         if IS_MACOS:
@@ -1984,7 +1995,8 @@ class ThemeStudioApp:
         self.status_var = tk.StringVar(value="还没有导入固件。")
         self.source_var = tk.StringVar(value="当前来源：未加载")
         self.notes_var = tk.StringVar(value="请选择左侧素材。")
-        self.capacity_var = tk.StringVar(value="容量提醒：导入固件后会在这里提示 1888 素材和打包体积变化。")
+        self.capacity_var = tk.StringVar(value="导入固件后会在这里提示 1888 素材和打包体积变化。")
+        self._capacity_refresh_token = 0
         self.group_map: dict[str, str] = {}
 
         self._configure_style()
@@ -2484,7 +2496,27 @@ class ThemeStudioApp:
         self.group_var.set(current)
 
     def _update_capacity_hint(self) -> None:
-        self.capacity_var.set(self.studio.capacity_summary())
+        self._capacity_refresh_token += 1
+        token = self._capacity_refresh_token
+        self.capacity_var.set("正在估算当前素材集的打包体积和 rsrc 分区余量……")
+
+        def worker() -> None:
+            try:
+                packed_size = self.studio.estimate_packed_silverdb_size()
+                summary = self.studio.capacity_summary(packed_size)
+            except StudioError:
+                summary = self.studio.capacity_summary()
+            except Exception as exc:  # pragma: no cover - UI fallback
+                summary = f"容量提醒：暂时无法估算当前打包体积，原因：{exc}"
+
+            def apply_result() -> None:
+                if token != self._capacity_refresh_token:
+                    return
+                self.capacity_var.set(summary)
+
+            self.root.after(0, apply_result)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_device_changed(self, _event=None) -> None:
         self._refresh_group_options()
@@ -2504,8 +2536,9 @@ class ThemeStudioApp:
         device_key = self._current_device()
 
         def task() -> None:
-            self.studio.download_official_backup(device_key, self._log_from_worker)
-            self.log_queue.put(("status", "官方 IPSW 备份已下载。"))
+            backup_path = self.studio.download_official_backup(device_key, self._log_from_worker)
+            self.log_queue.put(("status", f"官方 IPSW 备份已就绪：{backup_path}"))
+            self.log_queue.put(("notes", f"官方 IPSW 备份位置：{backup_path}"))
 
         self._run_task("下载官方 IPSW 备份", task)
 
@@ -3492,7 +3525,7 @@ class ThemeStudioApp:
             self.root,
             "替换时使用什么格式",
             (
-                f"当前目标素材原本是 {target_format}，调整尺寸后的新图仍然属于 1888。\n\n"
+                f"当前目标素材原本是 {target_format}，调整尺寸后的新图属于 1888。\n\n"
                 "请选择这次最终要写回成什么格式。只要继续往低色格式转换，就会进入预览。"
             ),
             full_conversion_actions(target_format),
