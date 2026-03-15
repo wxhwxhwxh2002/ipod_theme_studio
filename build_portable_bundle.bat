@@ -9,6 +9,8 @@ set "RUNTIME_SRC="
 if defined IPOD_THEME_RUNTIME_SRC set "RUNTIME_SRC=%IPOD_THEME_RUNTIME_SRC%"
 if not defined RUNTIME_SRC if defined CONDA_PREFIX set "RUNTIME_SRC=%CONDA_PREFIX%"
 if not defined RUNTIME_SRC if defined VIRTUAL_ENV set "RUNTIME_SRC=%VIRTUAL_ENV%"
+if not defined RUNTIME_SRC if exist "%USERPROFILE%\.conda\envs\ipod_theme\python.exe" set "RUNTIME_SRC=%USERPROFILE%\.conda\envs\ipod_theme"
+if not defined RUNTIME_SRC call :detect_runtime_from_path
 
 if not defined RUNTIME_SRC (
   echo Could not detect a Python runtime to bundle.
@@ -20,6 +22,7 @@ if not defined RUNTIME_SRC (
   echo   conda activate ipod_theme
   echo   build_portable_bundle.bat
   echo.
+  pause
   exit /b 1
 )
 
@@ -28,6 +31,7 @@ if not exist "%RUNTIME_SRC%\python.exe" (
   echo   %RUNTIME_SRC%
   echo.
   echo Expected to find python.exe under that directory.
+  pause
   exit /b 1
 )
 
@@ -125,4 +129,24 @@ exit /b 0
 
 :copyfail
 echo Failed to copy files into the portable bundle.
+pause
 exit /b 1
+
+:detect_runtime_from_path
+for /f "usebackq delims=" %%P in (`where python 2^>nul`) do (
+  echo %%P | findstr /I /C:"WindowsApps" >nul
+  if errorlevel 1 (
+    if exist "%%~dpPpython.exe" (
+      if exist "%%~dpPLib" (
+        echo %%~dpP | findstr /I /C:"\\anaconda3\\" >nul
+        if not errorlevel 1 (
+          rem Skip conda base unless the user explicitly pointed to it.
+        ) else (
+        set "RUNTIME_SRC=%%~dpP"
+        goto :eof
+        )
+      )
+    )
+  )
+)
+goto :eof
