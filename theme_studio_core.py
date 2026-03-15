@@ -234,6 +234,32 @@ def _patch_nano7_mse(mse_bytes: bytes) -> bytes:
     return bytes(patched)
 
 
+NANO6_DISK_SWAP_PATCHES = (
+    (0x5004, b"soso"),
+    (0x5144, b"ksid"),
+)
+
+
+def _apply_nano6_disk_swap(mse_bytes: bytes) -> bytes:
+    # Mirror the original CLI nano6 postprocess after rebuilding Firmware.MSE.
+    patched = bytearray(mse_bytes)
+    for offset, value in NANO6_DISK_SWAP_PATCHES:
+        end = offset + len(value)
+        if end > len(patched):
+            raise StudioError("nano 6 Disk Swap patch exceeds Firmware.MSE length.")
+        patched[offset:end] = value
+    return bytes(patched)
+
+
+def _verify_nano6_disk_swap(mse_bytes: bytes) -> None:
+    for offset, value in NANO6_DISK_SWAP_PATCHES:
+        end = offset + len(value)
+        if mse_bytes[offset:end] != value:
+            raise StudioError(
+                f"nano 6 Disk Swap verification failed at 0x{offset:X}: expected {value!r}."
+            )
+
+
 def _parse_mse(mse_bytes: bytes, family: str) -> MseImage:
     header = mse_bytes[:0x5000]
     sections: list[Section] = []
@@ -889,6 +915,10 @@ class ThemeStudio:
         img1.body = WORK_RSRC_PATCHED.read_bytes()
         section.body = _build_img1(img1)
         new_mse = _build_mse(mse)
+        if profile.family == "nano6":
+            new_mse = _apply_nano6_disk_swap(new_mse)
+            _verify_nano6_disk_swap(new_mse)
+            log("已应用 nano 6 专用 Disk Swap 修补。")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if session.source_kind == "official":
