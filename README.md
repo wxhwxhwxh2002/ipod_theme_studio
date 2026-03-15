@@ -58,6 +58,7 @@ The current GUI is focused on artwork workflows:
 This fork now also supports a Windows-friendly portable distribution model for non-technical users.
 
 - Run `build_portable_bundle.bat` to create a self-contained folder at `portable_bundle/iPodThemeStudio_Portable`
+- Before running `build_portable_bundle.bat`, activate the Python environment you want to bundle, or set `IPOD_THEME_RUNTIME_SRC` to that runtime root
 - The generated folder bundles a local Python runtime plus the GUI app and its required templates
 - End users can launch the tool by double-clicking `launch_theme_studio_portable.bat`
 - The GUI workflow in this portable bundle does not require Rust, Cargo, or `arm-none-eabi-gcc`

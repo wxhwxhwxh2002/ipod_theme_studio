@@ -3,11 +3,38 @@ setlocal
 cd /d "%~dp0"
 
 set "BUNDLE_ROOT=%~dp0portable_bundle\iPodThemeStudio_Portable"
-set "RUNTIME_SRC=C:\Users\wxh\.conda\envs\ipod_theme"
 set "RUNTIME_DST=%BUNDLE_ROOT%\runtime\python"
+set "RUNTIME_SRC="
+
+if defined IPOD_THEME_RUNTIME_SRC set "RUNTIME_SRC=%IPOD_THEME_RUNTIME_SRC%"
+if not defined RUNTIME_SRC if defined CONDA_PREFIX set "RUNTIME_SRC=%CONDA_PREFIX%"
+if not defined RUNTIME_SRC if defined VIRTUAL_ENV set "RUNTIME_SRC=%VIRTUAL_ENV%"
+
+if not defined RUNTIME_SRC (
+  echo Could not detect a Python runtime to bundle.
+  echo.
+  echo Activate your conda or venv environment first, or set:
+  echo   IPOD_THEME_RUNTIME_SRC=full_path_to_python_runtime
+  echo.
+  echo Examples:
+  echo   conda activate ipod_theme
+  echo   build_portable_bundle.bat
+  echo.
+  exit /b 1
+)
+
+if not exist "%RUNTIME_SRC%\python.exe" (
+  echo Detected runtime root is invalid:
+  echo   %RUNTIME_SRC%
+  echo.
+  echo Expected to find python.exe under that directory.
+  exit /b 1
+)
 
 echo Preparing portable bundle at:
 echo   %BUNDLE_ROOT%
+echo Using Python runtime from:
+echo   %RUNTIME_SRC%
 
 if exist "%BUNDLE_ROOT%" rmdir /s /q "%BUNDLE_ROOT%"
 
