@@ -1969,6 +1969,353 @@ class SavedAssetBrowserDialog:
             self._confirm_pick()
 
 
+class FontSlotBrowserDialog:
+    def __init__(self, parent: tk.Tk, studio: ThemeStudio, log_callback=None) -> None:
+        self.parent = parent
+        self.studio = studio
+        self.log_callback = log_callback
+        self.items_by_name: dict[str, dict[str, object]] = {}
+        self.summary_var = tk.StringVar(value="")
+        self.detail_var = tk.StringVar(value="")
+        self.warning_var = tk.StringVar(
+            value="字体替换只会在最终打包时写入。不是所有字体都兼容 iPod nano，替换后若设备无法启动，请清除替换并重新打包。"
+        )
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("字体槽位")
+        self.dialog.geometry("1100x680")
+        self.dialog.minsize(980, 560)
+        self.dialog.configure(bg=BG)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self._build_layout()
+        self._load_items()
+
+    def _build_layout(self) -> None:
+        container = tk.Frame(self.dialog, bg=CARD, padx=18, pady=18)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+        container.rowconfigure(2, weight=1)
+        container.columnconfigure(0, weight=1)
+        container.columnconfigure(1, weight=0)
+
+        tk.Label(
+            container,
+            text="字体槽位",
+            bg=CARD,
+            fg=TEXT,
+            font=("Segoe UI Semibold", 17),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        tk.Label(
+            container,
+            textvariable=self.summary_var,
+            bg=CARD,
+            fg=MUTED,
+            justify="left",
+            wraplength=920,
+            font=("Segoe UI", 10),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        list_card = tk.Frame(container, bg=CARD)
+        list_card.grid(row=2, column=0, sticky="nsew", pady=(14, 0))
+        list_card.rowconfigure(0, weight=1)
+        list_card.columnconfigure(0, weight=1)
+
+        columns = ("name", "extension", "status")
+        self.font_tree = ttk.Treeview(list_card, columns=columns, show="headings")
+        self.font_tree.heading("name", text="文件名")
+        self.font_tree.heading("extension", text="扩展名")
+        self.font_tree.heading("status", text="状态")
+        self.font_tree.column("name", width=320, anchor="w")
+        self.font_tree.column("extension", width=90, anchor="center")
+        self.font_tree.column("status", width=120, anchor="center")
+        self.font_tree.grid(row=0, column=0, sticky="nsew")
+        self.font_tree.bind("<<TreeviewSelect>>", self._on_item_selected)
+
+        scrollbar = ttk.Scrollbar(list_card, orient="vertical", command=self.font_tree.yview)
+        self.font_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        detail_card = tk.Frame(container, bg="#f7f1e7", padx=14, pady=14)
+        detail_card.grid(row=2, column=1, sticky="ns", padx=(16, 0), pady=(14, 0))
+
+        tk.Label(
+            detail_card,
+            text="当前槽位详情",
+            bg="#f7f1e7",
+            fg=TEXT,
+            font=("Segoe UI Semibold", 12),
+        ).pack(anchor="w")
+
+        self.detail_label = tk.Label(
+            detail_card,
+            textvariable=self.detail_var,
+            bg="#f7f1e7",
+            fg=TEXT,
+            justify="left",
+            anchor="w",
+            wraplength=320,
+            font=("Consolas", 10),
+        )
+        self.detail_label.pack(fill="x", pady=(12, 0))
+
+        self.warning_label = tk.Label(
+            detail_card,
+            textvariable=self.warning_var,
+            bg="#f7f1e7",
+            fg=MUTED,
+            justify="left",
+            wraplength=320,
+            font=("Segoe UI", 10),
+        )
+        self.warning_label.pack(fill="x", pady=(12, 0))
+
+        buttons = tk.Frame(container, bg=CARD)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+
+        self.replace_button = tk.Button(
+            buttons,
+            text="选择替换字体",
+            command=self._choose_replacement,
+            **button_style("primary"),
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        )
+        self.replace_button.pack(side="left")
+
+        self.clear_button = tk.Button(
+            buttons,
+            text="清除替换",
+            command=self._clear_replacement,
+            **button_style("secondary"),
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        )
+        self.clear_button.pack(side="left", padx=(10, 0))
+
+        self.export_button = tk.Button(
+            buttons,
+            text="导出当前字体",
+            command=self._export_current_font,
+            **button_style("secondary"),
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        )
+        self.export_button.pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            buttons,
+            text="打开字体暂存目录",
+            command=self._open_staging_dir,
+            **button_style("secondary"),
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            buttons,
+            text="刷新列表",
+            command=self._load_items,
+            **button_style("secondary"),
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            buttons,
+            text="关闭",
+            command=self.dialog.destroy,
+            **button_style("secondary"),
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=9,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side="right")
+
+    def show(self) -> None:
+        self.dialog.wait_window()
+
+    def _selected_name(self) -> str | None:
+        selection = self.font_tree.selection()
+        if not selection:
+            return None
+        return str(selection[0])
+
+    def _load_items(self, keep_name: str | None = None) -> None:
+        selected = keep_name if keep_name is not None else self._selected_name()
+        self.font_tree.delete(*self.font_tree.get_children())
+        items = self.studio.list_fonts()
+        self.items_by_name = {str(item["name"]): item for item in items}
+
+        replace_count = sum(1 for item in items if item["status"] == "已指定替换")
+        self.summary_var.set(
+            f"当前固件中检测到 {len(items)} 个字体槽位，其中已指定替换 {replace_count} 个。"
+            " v1 只支持 .ttf 替换；.ttc / .otf 仅展示，不提供写回。"
+        )
+
+        for item in items:
+            self.font_tree.insert(
+                "",
+                "end",
+                iid=str(item["name"]),
+                values=(item.get("display_name", item["name"]), item["extension"], item["status"]),
+            )
+
+        if not items:
+            self.detail_var.set("当前还没有可用的字体工作区。\n请先导入官方固件或社区 IPSW。")
+            self.warning_var.set("字体替换只会在最终打包时写入。")
+            self._update_button_state(None)
+            return
+
+        chosen = selected if selected in self.items_by_name else str(items[0]["name"])
+        self.font_tree.selection_set(chosen)
+        self.font_tree.focus(chosen)
+        self.font_tree.see(chosen)
+        self._on_item_selected()
+
+    def _update_button_state(self, item: dict[str, object] | None) -> None:
+        if not item:
+            self.replace_button.configure(state="disabled")
+            self.clear_button.configure(state="disabled")
+            self.export_button.configure(state="disabled")
+            return
+
+        supported = bool(item.get("supported"))
+        has_replacement = bool(item.get("replacement_path"))
+        self.replace_button.configure(state="normal" if supported else "disabled")
+        self.clear_button.configure(state="normal" if supported and has_replacement else "disabled")
+        self.export_button.configure(state="normal")
+
+    def _on_item_selected(self, _event=None) -> None:
+        slot_name = self._selected_name()
+        item = self.items_by_name.get(slot_name or "")
+        if not item:
+            self.detail_var.set("请先从左侧列表选择一个字体槽位。")
+            self.warning_var.set("字体替换只会在最终打包时写入。")
+            self._update_button_state(None)
+            return
+
+        slot_name = str(item["name"])
+        display_name = str(item.get("display_name", slot_name))
+        extension = str(item["extension"])
+        status = str(item["status"])
+        replacement_path = str(item.get("replacement_path", "")) or "-"
+        supported = bool(item["supported"])
+        hint = str(item.get("hint", ""))
+        kind = str(item.get("kind", "file"))
+
+        support_text = "可替换的 TrueType 槽位（.ttf）" if supported else "v1 暂不支持此格式替换"
+        lines = [
+            f"文件名:   {slot_name}",
+            f"扩展名:   {extension}",
+            f"状态:     {status}",
+            f"支持情况: {support_text}",
+            f"替换文件: {replacement_path}",
+        ]
+        if hint:
+            lines.append(f"提示:     {hint}")
+        self.detail_var.set("\n".join(lines))
+
+        warnings = [
+            "字体替换只会在最终打包时写入，不会立刻改写当前 rsrc 基底文件。",
+            "如果目标是简体中文，请优先选择包含完整简体中文字形的 .ttf；v1 不做字形覆盖率分析。",
+            "不是所有字体都兼容 iPod nano，替换后若设备无法启动，请清除替换并重新打包。",
+        ]
+        if not supported:
+            warnings.insert(1, "当前这个槽位是 .ttc / .otf，只做只读展示，暂不支持替换。")
+        self.warning_var.set(" ".join(warnings))
+        self._update_button_state(item)
+
+    def _choose_replacement(self) -> None:
+        slot_name = self._selected_name()
+        item = self.items_by_name.get(slot_name or "")
+        if not item or not bool(item.get("supported")):
+            messagebox.showinfo("当前槽位不可替换", "v1 只支持 .ttf 槽位替换。", parent=self.dialog)
+            return
+
+        source = filedialog.askopenfilename(
+            title=f"为 {slot_name} 选择替换字体",
+            filetypes=[("TrueType font", "*.ttf"), ("All files", "*.*")],
+        )
+        if not source:
+            return
+
+        try:
+            staged_path = self.studio.stage_font_replacement(slot_name, Path(source))
+        except StudioError as exc:
+            messagebox.showerror("暂存字体失败", str(exc), parent=self.dialog)
+            return
+
+        if self.log_callback is not None:
+            self.log_callback(f"已为字体槽位暂存替换：{slot_name} <- {Path(source).name}")
+            self.log_callback(f"字体暂存位置：{staged_path}")
+        self._load_items(keep_name=slot_name)
+
+    def _clear_replacement(self) -> None:
+        slot_name = self._selected_name()
+        if not slot_name:
+            return
+        try:
+            self.studio.clear_font_replacement(slot_name)
+        except StudioError as exc:
+            messagebox.showerror("清除替换失败", str(exc), parent=self.dialog)
+            return
+
+        if self.log_callback is not None:
+            self.log_callback(f"已清除字体槽位替换：{slot_name}")
+        self._load_items(keep_name=slot_name)
+
+    def _export_current_font(self) -> None:
+        slot_name = self._selected_name()
+        if not slot_name:
+            return
+
+        item = self.items_by_name.get(slot_name, {})
+        if item.get("kind") == "ttc-member":
+            initial_name = f"{str(item.get('member_name') or 'exported_font')}.ttf"
+            file_pattern = "*.ttf"
+        else:
+            initial_name = str(item.get("display_name", slot_name))
+            file_pattern = f"*{Path(initial_name).suffix}"
+        target = filedialog.asksaveasfilename(
+            title="导出当前字体",
+            defaultextension=Path(initial_name).suffix,
+            initialfile=initial_name,
+            filetypes=[("Font file", file_pattern), ("All files", "*.*")],
+        )
+        if not target:
+            return
+
+        try:
+            output_path = self.studio.export_current_font(slot_name, Path(target))
+        except StudioError as exc:
+            messagebox.showerror("导出字体失败", str(exc), parent=self.dialog)
+            return
+
+        if self.log_callback is not None:
+            self.log_callback(f"已导出当前字体：{slot_name} -> {output_path}")
+
+    def _open_staging_dir(self) -> None:
+        open_in_file_manager(self.studio.fonts_dir(), parent=self.dialog)
+
+
 class ThemeStudioApp:
     def __init__(self) -> None:
         self.studio = ThemeStudio()
@@ -2155,6 +2502,8 @@ class ThemeStudioApp:
         self._add_sidebar_button(sidebar, "重新扫描素材列表", self._refresh_assets)
         self._add_sidebar_button(sidebar, "生成修改后的 IPSW", self._build_ipsw, variant="primary")
         self._add_sidebar_button(sidebar, "关于与版权", self._show_about)
+
+        self._add_sidebar_button(sidebar, "查看字体槽位", self._show_font_slots)
 
         status_card = tk.Frame(sidebar, bg=STATUS_BG, padx=16, pady=16, highlightthickness=1, highlightbackground="#244d86")
         status_card.pack(fill="x", pady=(18, 0))
@@ -3095,6 +3444,22 @@ class ThemeStudioApp:
             import_callback=self._import_file_to_saved_assets,
             reduce_callback=self._reduce_saved_library_asset,
             resize_callback=self._resize_saved_library_asset,
+        ).show()
+
+    def _show_font_slots(self) -> None:
+        session = self.studio.load_session()
+        if not session.device_key or not session.source_kind:
+            messagebox.showinfo("还没有固件工作区", "请先导入官方固件或社区 IPSW，再查看当前固件中的字体槽位。")
+            return
+
+        if not self.studio.list_fonts():
+            messagebox.showinfo("没有检测到字体槽位", "当前工作区里没有找到 /Resources/Fonts，请先重新导入固件或 IPSW。")
+            return
+
+        FontSlotBrowserDialog(
+            self.root,
+            self.studio,
+            log_callback=lambda message: self._append_log("log", message),
         ).show()
 
     def _ask_target_size(self) -> tuple[int, int] | None:

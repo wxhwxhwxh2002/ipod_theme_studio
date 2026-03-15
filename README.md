@@ -30,6 +30,8 @@ This fork repositions the project as `iPod Theme Studio`: a friendlier desktop-o
 - Added a saved artwork library with search, notes, delete, import-from-computer, reuse-in-replacement, and manual color-conversion tools
 - Added batch import into the saved artwork library, with optional shared target size and per-image crop flow
 - Added direct format detection for saved assets, so imported images and manually converted library entries show an inferred format even when the filename does not contain an artwork suffix
+- Added a font-slot manager for firmware `/Resources/Fonts`, with staged `.ttf` replacement, export, and build-time writeback
+- Added a targeted TTC workflow for `STHeiti-Medium.ttc / Heiti SC`, so the Simplified Chinese font member can be replaced without replacing the whole collection
 - Added an About page in the GUI with upstream attribution and GPL-3.0 notice
 - Improved Windows Python handling in `src/main.rs` so unpacking is more reliable when using a venv or conda environment
 - Documented the missing Python dependency `fs`
@@ -51,6 +53,9 @@ The current GUI is focused on artwork workflows:
 - Batch-import multiple outside images into the saved library, either directly or with one shared target size plus per-image cropping
 - Search the saved library by filename or note, edit notes, delete saved items, and reuse saved assets as replacement sources
 - Manually convert the current artwork or saved-library assets to lower-color formats
+- Browse firmware font slots, export the current font file, and stage `.ttf` replacements that are written during the final IPSW build
+- Show `.ttc` / `.otf` font slots as read-only entries so unsupported formats are visible without being silently skipped
+- Replace the `Heiti SC` member inside `STHeiti-Medium.ttc` as a dedicated Chinese-font workflow, while leaving the other TTC members untouched
 - Repack a modified IPSW for flashing through iTunes / Apple Devices
 
 ### Portable bundle

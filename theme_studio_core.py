@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+import copy
 import contextlib
 import io
 import json
@@ -13,6 +14,7 @@ import urllib.request
 import zipfile
 
 from PIL import Image
+from fontTools import ttLib
 from pyfatfs import PyFatFS
 
 from ipodhax.silverdb import pack_silverdb, unpack_silverdb
@@ -39,7 +41,10 @@ WORK_EXPORTS = CURRENT_ROOT / "exports"
 WORK_INPUTS = CURRENT_ROOT / "inputs"
 WORK_OUTPUTS = CURRENT_ROOT / "outputs"
 WORK_TMP = CURRENT_ROOT / "tmp"
+WORK_FONTS = CURRENT_ROOT / "fonts"
 WORK_INVENTORY = CURRENT_ROOT / "artwork_index.json"
+WORK_FONT_INVENTORY = CURRENT_ROOT / "font_inventory.json"
+WORK_FONT_REPLACEMENTS = CURRENT_ROOT / "font_replacements.json"
 WORK_SILVER = WORK_EXPORTS / "SilverImagesDB.LE.bin"
 WORK_SILVER_PACKED = WORK_EXPORTS / "SilverImagesDB.LE.bin2"
 WORK_RSRC_BASE = WORK_TMP / "rsrc_base.bin"
@@ -100,6 +105,18 @@ ARTWORK_GROUPS = [
     {"key": "n7-wallpapers-thumb", "label": "Nano 7 壁纸缩略图（117x200）", "devices": {"nano7-2012", "nano7-2015"}},
 ]
 
+SUPPORTED_TTC_CHILDREN = {
+    "STHeiti-Medium.ttc": [
+        {
+            "member_index": 1,
+            "member_name": "Heiti SC",
+            "slot_id": "STHeiti-Medium.ttc::Heiti SC",
+            "display_name": "STHeiti-Medium.ttc / Heiti SC",
+            "hint": "简体中文主字体候选（当前唯一支持的 TTC 子字体替换入口）",
+        }
+    ]
+}
+
 
 @dataclass
 class SessionState:
@@ -142,7 +159,7 @@ class Img1Image:
 
 
 def _mkdirs() -> None:
-    for path in [STUDIO_ROOT, CURRENT_ROOT, SAVED_ROOT, WORK_BODY, WORK_EXPORTS, WORK_INPUTS, WORK_OUTPUTS, WORK_TMP]:
+    for path in [STUDIO_ROOT, CURRENT_ROOT, SAVED_ROOT, WORK_BODY, WORK_EXPORTS, WORK_INPUTS, WORK_OUTPUTS, WORK_TMP, WORK_FONTS]:
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -180,6 +197,98 @@ def _load_saved_metadata() -> dict[str, dict[str, str]]:
 def _save_saved_metadata(data: dict[str, dict[str, str]]) -> None:
     SAVED_ROOT.mkdir(parents=True, exist_ok=True)
     SAVED_METADATA_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_font_inventory() -> list[dict[str, object]]:
+    if not WORK_FONT_INVENTORY.exists():
+        return []
+    try:
+        data = json.loads(WORK_FONT_INVENTORY.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _save_font_inventory(items: list[dict[str, object]]) -> None:
+    WORK_FONT_INVENTORY.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_font_replacements() -> dict[str, dict[str, str]]:
+    if not WORK_FONT_REPLACEMENTS.exists():
+        return {}
+    try:
+        data = json.loads(WORK_FONT_REPLACEMENTS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    normalized: dict[str, dict[str, str]] = {}
+    for slot_name, entry in data.items():
+        if isinstance(entry, str):
+            normalized[slot_name] = {"source_path": entry, "staged_path": entry}
+        elif isinstance(entry, dict):
+            source_path = str(entry.get("source_path", ""))
+            staged_path = str(entry.get("staged_path", ""))
+            if source_path or staged_path:
+                normalized[slot_name] = {"source_path": source_path, "staged_path": staged_path}
+    return normalized
+
+
+def _save_font_replacements(data: dict[str, dict[str, str]]) -> None:
+    WORK_FONT_REPLACEMENTS.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _scan_font_slots(rsrc_path: Path) -> list[dict[str, object]]:
+    if not rsrc_path.exists():
+        return []
+
+    fat = PyFatFS.PyFatFS(str(rsrc_path), read_only=False)
+    try:
+        try:
+            names = sorted(fat.listdir("/Resources/Fonts"))
+        except Exception:
+            return []
+    finally:
+        fat.close()
+
+    items: list[dict[str, object]] = []
+    for name in names:
+        suffix = Path(name).suffix.lower()
+        supported = suffix == ".ttf"
+        hint = ""
+        if name in {"Helvetica.ttf", "HelveticaBold.ttf"}:
+            hint = "上游 README 明确说明过的常用槽位"
+        items.append(
+            {
+                "slot_id": name,
+                "name": name,
+                "display_name": name,
+                "extension": suffix or "",
+                "supported": supported,
+                "kind": "ttf-file" if supported else "file",
+                "container_name": name,
+                "member_index": None,
+                "member_name": "",
+                "hint": hint,
+            }
+        )
+        for child in SUPPORTED_TTC_CHILDREN.get(name, []):
+            items.append(
+                {
+                    "slot_id": child["slot_id"],
+                    "name": child["slot_id"],
+                    "display_name": child["display_name"],
+                    "extension": suffix or "",
+                    "supported": True,
+                    "kind": "ttc-member",
+                    "container_name": name,
+                    "member_index": child["member_index"],
+                    "member_name": child["member_name"],
+                    "hint": child["hint"],
+                }
+            )
+    return items
 
 
 def _parse_artwork_filename(path: Path) -> tuple[str, str]:
@@ -517,6 +626,11 @@ class ThemeStudio:
                 unpack_silverdb(stream, WORK_BODY)
         inventory = self._scan_body_items()
         WORK_INVENTORY.write_text(json.dumps(inventory, indent=2, ensure_ascii=False), encoding="utf-8")
+        if WORK_FONTS.exists():
+            shutil.rmtree(WORK_FONTS)
+        WORK_FONTS.mkdir(parents=True, exist_ok=True)
+        _save_font_inventory(_scan_font_slots(WORK_RSRC_BASE))
+        _save_font_replacements({})
         log("已解包美术资源到 body 目录。")
 
     def _scan_body_items(self) -> list[dict[str, str]]:
@@ -545,6 +659,204 @@ class ThemeStudio:
         if not WORK_INVENTORY.exists():
             return []
         return json.loads(WORK_INVENTORY.read_text(encoding="utf-8"))
+
+    def fonts_dir(self) -> Path:
+        return WORK_FONTS
+
+    def list_fonts(self) -> list[dict[str, object]]:
+        inventory = _load_font_inventory()
+        needs_rescan = False
+        if inventory:
+            if any("slot_id" not in item for item in inventory):
+                needs_rescan = True
+            else:
+                inventory_names = {str(item.get("container_name", "")) for item in inventory} | {
+                    str(item.get("name", "")) for item in inventory
+                }
+                for container_name, children in SUPPORTED_TTC_CHILDREN.items():
+                    if container_name not in inventory_names:
+                        continue
+                    if not any(str(item.get("slot_id", "")) == child["slot_id"] for child in children for item in inventory):
+                        needs_rescan = True
+                        break
+        if (not inventory or needs_rescan) and WORK_RSRC_BASE.exists():
+            inventory = _scan_font_slots(WORK_RSRC_BASE)
+            _save_font_inventory(inventory)
+
+        replacements = _load_font_replacements()
+        items: list[dict[str, object]] = []
+        for item in inventory:
+            slot_name = str(item.get("slot_id", item.get("name", "")))
+            replacement = replacements.get(slot_name, {})
+            replacement_path = replacement.get("source_path", "") or replacement.get("staged_path", "")
+            supported = bool(item.get("supported"))
+            if replacement_path and supported:
+                status = "已指定替换"
+            elif supported:
+                status = "原始"
+            else:
+                status = "暂不支持"
+            items.append(
+                {
+                    "name": slot_name,
+                    "display_name": str(item.get("display_name", slot_name)),
+                    "extension": str(item.get("extension", "")),
+                    "supported": supported,
+                    "status": status,
+                    "replacement_path": replacement_path,
+                    "kind": str(item.get("kind", "file")),
+                    "container_name": str(item.get("container_name", "")),
+                    "member_index": item.get("member_index"),
+                    "member_name": str(item.get("member_name", "")),
+                    "hint": str(item.get("hint", "")),
+                }
+            )
+        return items
+
+    def stage_font_replacement(self, slot_name: str, source_path: Path) -> Path:
+        slot = next((item for item in self.list_fonts() if item["name"] == slot_name), None)
+        if slot is None:
+            raise StudioError(f"没有找到字体槽位：{slot_name}")
+        if not bool(slot["supported"]):
+            raise StudioError(f"{slot_name} 当前不是可替换的 .ttf 槽位")
+        if source_path.suffix.lower() != ".ttf":
+            raise StudioError("v1 只支持导入 .ttf 字体文件")
+        if not source_path.exists():
+            raise StudioError(f"没有找到要导入的字体文件：{source_path}")
+        try:
+            test_font = ttLib.TTFont(str(source_path))
+            test_font.close()
+        except Exception as exc:
+            raise StudioError("选中的字体文件不是可用的 TrueType 字体，无法导入。") from exc
+
+        WORK_FONTS.mkdir(parents=True, exist_ok=True)
+        safe_name = slot_name.replace("::", "__").replace("/", "_")
+        staged_path = WORK_FONTS / safe_name
+        _copy_file(source_path, staged_path)
+
+        replacements = _load_font_replacements()
+        replacements[slot_name] = {
+            "source_path": str(source_path.resolve()),
+            "staged_path": str(staged_path.resolve()),
+        }
+        _save_font_replacements(replacements)
+        return staged_path
+
+    def clear_font_replacement(self, slot_name: str) -> None:
+        replacements = _load_font_replacements()
+        entry = replacements.pop(slot_name, None)
+        if entry:
+            staged_path = Path(entry.get("staged_path", ""))
+            if staged_path.exists():
+                staged_path.unlink()
+        _save_font_replacements(replacements)
+
+    def export_current_font(self, slot_name: str, output_path: Path) -> Path:
+        if not WORK_RSRC_BASE.exists():
+            raise StudioError("当前还没有可导出的字体工作区，请先导入固件或 IPSW")
+
+        slot = next((item for item in self.list_fonts() if item["name"] == slot_name), None)
+        if slot is None:
+            raise StudioError(f"没有找到字体槽位: {slot_name}")
+        container_name = str(slot.get("container_name") or slot_name)
+        fs_path = f"/Resources/Fonts/{container_name}"
+        fat = PyFatFS.PyFatFS(str(WORK_RSRC_BASE), read_only=False)
+        try:
+            with fat.openbin(fs_path, mode="rb") as stream:
+                data = stream.read()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            if slot.get("kind") == "ttc-member":
+                collection = ttLib.TTCollection(io.BytesIO(data))
+                member_index = int(slot.get("member_index", 0))
+                collection.fonts[member_index].save(str(output_path))
+                collection.close()
+            else:
+                output_path.write_bytes(data)
+        except Exception as exc:
+            raise StudioError(f"导出字体失败：{slot_name}") from exc
+        finally:
+            fat.close()
+        return output_path
+
+    def apply_font_replacements(self, rsrc_path: Path, log: LogFn) -> list[str]:
+        replacements = _load_font_replacements()
+        if not replacements:
+            return []
+
+        font_items = {str(item["name"]): item for item in self.list_fonts()}
+        fat = PyFatFS.PyFatFS(str(rsrc_path), read_only=False)
+        applied: list[str] = []
+        try:
+            for slot_name, entry in replacements.items():
+                slot = font_items.get(slot_name)
+                if not slot or not bool(slot.get("supported")):
+                    log(f"字体槽位暂不支持替换，已跳过：{slot_name}")
+                    continue
+
+                staged_path = Path(entry.get("staged_path", ""))
+                if not staged_path.exists():
+                    log(f"没有找到已暂存的替换字体，已跳过：{slot_name}")
+                    continue
+
+                slot_kind = str(slot.get("kind", "file"))
+                container_name = str(slot.get("container_name") or slot_name)
+                fs_path = f"/Resources/Fonts/{container_name}"
+                if slot_kind == "ttc-member":
+                    collection = None
+                    replacement_font = None
+                    try:
+                        with fat.openbin(fs_path, mode="rb") as stream:
+                            collection = ttLib.TTCollection(io.BytesIO(stream.read()))
+                        member_index = int(slot.get("member_index", 0))
+                        original_font = collection.fonts[member_index]
+                        replacement_font = ttLib.TTFont(str(staged_path))
+                        replacement_font["name"] = copy.deepcopy(original_font["name"])
+                        collection.fonts[member_index] = replacement_font
+
+                        output = io.BytesIO()
+                        collection.save(output)
+
+                        fat.remove(fs_path)
+                        with fat.openbin(fs_path, mode="wb") as stream:
+                            stream.write(output.getvalue())
+                        applied.append(slot_name)
+                        log(f"已应用字体替换：{slot_name}")
+                    except Exception as exc:
+                        raise StudioError(f"写回字体槽位失败：{slot_name} ({exc})") from exc
+                    finally:
+                        if replacement_font is not None:
+                            replacement_font.close()
+                        if collection is not None:
+                            collection.close()
+                    continue
+
+                original_font = None
+                replacement_font = None
+                try:
+                    with fat.openbin(fs_path, mode="rb") as stream:
+                        original_font = ttLib.TTFont(io.BytesIO(stream.read()))
+                    replacement_font = ttLib.TTFont(str(staged_path))
+                    replacement_font["name"] = copy.deepcopy(original_font["name"])
+
+                    output = io.BytesIO()
+                    replacement_font.save(output)
+
+                    fat.remove(fs_path)
+                    with fat.openbin(fs_path, mode="wb") as stream:
+                        stream.write(output.getvalue())
+                    applied.append(slot_name)
+                    log(f"已应用字体替换：{slot_name}")
+                except Exception as exc:
+                    raise StudioError(f"写回字体槽位失败：{slot_name} ({exc})") from exc
+                finally:
+                    if replacement_font is not None:
+                        replacement_font.close()
+                    if original_font is not None:
+                        original_font.close()
+        finally:
+            fat.close()
+
+        return applied
 
     def get_artwork_groups(self, device_key: str | None = None) -> list[dict[str, str]]:
         resolved_device = device_key or self.load_session().device_key
@@ -878,6 +1190,9 @@ class ThemeStudio:
         log(self.capacity_summary(silver_path.stat().st_size))
         _copy_file(WORK_RSRC_BASE, WORK_RSRC_PATCHED)
         _replace_silverdb(WORK_RSRC_PATCHED, silver_path)
+        applied_fonts = self.apply_font_replacements(WORK_RSRC_PATCHED, log)
+        if applied_fonts:
+            log(f"字体替换只会在最终打包时写入，本次已应用 {len(applied_fonts)} 个字体槽位。")
         log("已把新的 SilverImagesDB 写回 rsrc 分区。")
 
         mse = _parse_mse(WORK_MSE_BASE.read_bytes(), profile.family)
