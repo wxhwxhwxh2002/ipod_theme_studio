@@ -44,14 +44,41 @@ echo Writing portable launcher...
 (
   echo @echo off
   echo setlocal
-  echo cd /d "%%~dp0"
+  echo set "APP_ROOT=%%~dp0"
+  echo pushd "%%APP_ROOT%%"
   echo.
-  echo set "RUNTIME=%%~dp0runtime\python"
-  echo set "PATH=%%RUNTIME%%;%%RUNTIME%%\Library\bin;%%RUNTIME%%\Scripts;%%PATH%%"
-  echo set "PYTHONHOME=%%RUNTIME%%"
+  echo set "RUNTIME=%%APP_ROOT%%runtime\python"
+  echo set "SCRIPT_PATH=%%APP_ROOT%%theme_studio.py"
+  echo set "PYTHONEXE=%%RUNTIME%%\python.exe"
+  echo set "PYTHONPATH="
+  echo set "PYTHONHOME="
+  echo set "PYTHONEXECUTABLE="
   echo set "PYTHONNOUSERSITE=1"
+  echo set "CONDA_PREFIX="
+  echo set "CONDA_DEFAULT_ENV="
+  echo set "VIRTUAL_ENV="
+  echo set "PATH=%%RUNTIME%%;%%RUNTIME%%\Library\bin;%%RUNTIME%%\Scripts;%%PATH%%"
   echo.
-  echo "%%RUNTIME%%\python.exe" theme_studio.py
+  echo if not exist "%%PYTHONEXE%%" ^(
+  echo   echo Portable runtime not found: %%PYTHONEXE%%
+  echo   pause
+  echo   popd
+  echo   endlocal
+  echo   exit /b 1
+  echo ^)
+  echo.
+  echo "%%PYTHONEXE%%" "%%SCRIPT_PATH%%"
+  echo if errorlevel 1 ^(
+  echo   echo.
+  echo   echo Failed to launch iPod Theme Studio.
+  echo   echo App root: %%APP_ROOT%%
+  echo   echo Runtime: %%PYTHONEXE%%
+  echo   pause
+  echo   popd
+  echo   endlocal
+  echo   exit /b 1
+  echo ^)
+  echo popd
   echo endlocal
 ) > "%BUNDLE_ROOT%\launch_theme_studio_portable.bat"
 
