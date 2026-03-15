@@ -372,6 +372,59 @@ def _replace_silverdb(rsrc_path: Path, silver_path: Path) -> None:
         fat.close()
 
 
+def _read_firmware_mse_from_archive(archive: zipfile.ZipFile) -> tuple[bytes, str] | tuple[None, None]:
+    direct_matches = [
+        name for name in archive.namelist()
+        if Path(name).name.lower() == "firmware.mse"
+    ]
+    if not direct_matches:
+        return None, None
+
+    preferred = next((name for name in direct_matches if name == "Firmware.MSE"), direct_matches[0])
+    return archive.read(preferred), preferred
+
+
+def _load_community_ipsw_source(ipsw_path: Path, working_inputs_dir: Path) -> tuple[Path, bytes, str | None]:
+    try:
+        with zipfile.ZipFile(ipsw_path, "r") as archive:
+            mse_bytes, mse_name = _read_firmware_mse_from_archive(archive)
+            if mse_bytes is not None:
+                source_copy = working_inputs_dir / ipsw_path.name
+                _copy_file(ipsw_path, source_copy)
+                note = None if mse_name == "Firmware.MSE" else f"已从包内路径 {mse_name} 读取 Firmware.MSE。"
+                return source_copy, mse_bytes, note
+
+            nested_candidates = [
+                name for name in archive.namelist()
+                if name.lower().endswith((".ipsw", ".zip"))
+            ]
+            for nested_name in nested_candidates:
+                nested_bytes = archive.read(nested_name)
+                try:
+                    with zipfile.ZipFile(io.BytesIO(nested_bytes), "r") as nested_archive:
+                        mse_bytes, _mse_name = _read_firmware_mse_from_archive(nested_archive)
+                        if mse_bytes is None:
+                            continue
+
+                        nested_basename = Path(nested_name).name or ipsw_path.name
+                        source_copy = working_inputs_dir / nested_basename
+                        source_copy.write_bytes(nested_bytes)
+                        note = f"检测到外层压缩包，已自动使用其中的 {nested_basename}。"
+                        return source_copy, mse_bytes, note
+                except zipfile.BadZipFile:
+                    continue
+    except zipfile.BadZipFile as exc:
+        raise StudioError(
+            "所选文件不是有效的 IPSW/ZIP。"
+            " 如果这是社区作者额外压缩过的外层包，请先解压，再选择里面真正的 .ipsw 文件。"
+        ) from exc
+
+    raise StudioError(
+        "所选 IPSW 中没有找到 Firmware.MSE。"
+        " 如果你选中的是外层压缩包，请先解压后再选择其中真正的 IPSW 文件。"
+    )
+
+
 def _count_unique_colors(path: Path) -> int:
     with Image.open(path) as image:
         colors = set(image.convert("RGBA").getdata())
@@ -498,16 +551,10 @@ class ThemeStudio:
     def import_community_ipsw(self, device_key: str, ipsw_path: Path, log: LogFn) -> SessionState:
         profile = self.get_profile(device_key)
         _reset_current_workspace()
-
-        source_copy = WORK_INPUTS / ipsw_path.name
-        _copy_file(ipsw_path, source_copy)
+        source_copy, mse_bytes, import_note = _load_community_ipsw_source(ipsw_path, WORK_INPUTS)
         log(f"已复制社区 IPSW 到工作区: {source_copy.name}")
-
-        with zipfile.ZipFile(source_copy, "r") as archive:
-            try:
-                mse_bytes = archive.read("Firmware.MSE")
-            except KeyError as exc:
-                raise StudioError("所选 IPSW 中没有找到 Firmware.MSE。") from exc
+        if import_note:
+            log(import_note)
 
         WORK_MSE_BASE.write_bytes(mse_bytes)
         self._prepare_artwork_workspace(profile.family, mse_bytes, log)
