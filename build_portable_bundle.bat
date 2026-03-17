@@ -3,11 +3,42 @@ setlocal
 cd /d "%~dp0"
 
 set "BUNDLE_ROOT=%~dp0portable_bundle\iPodThemeStudio_Portable"
-set "RUNTIME_SRC=C:\Users\wxh\.conda\envs\ipod_theme"
 set "RUNTIME_DST=%BUNDLE_ROOT%\runtime\python"
+set "RUNTIME_SRC="
+
+if defined IPOD_THEME_RUNTIME_SRC set "RUNTIME_SRC=%IPOD_THEME_RUNTIME_SRC%"
+if not defined RUNTIME_SRC if defined CONDA_PREFIX set "RUNTIME_SRC=%CONDA_PREFIX%"
+if not defined RUNTIME_SRC if defined VIRTUAL_ENV set "RUNTIME_SRC=%VIRTUAL_ENV%"
+if not defined RUNTIME_SRC if exist "%USERPROFILE%\.conda\envs\ipod_theme\python.exe" set "RUNTIME_SRC=%USERPROFILE%\.conda\envs\ipod_theme"
+if not defined RUNTIME_SRC call :detect_runtime_from_path
+
+if not defined RUNTIME_SRC (
+  echo Could not detect a Python runtime to bundle.
+  echo.
+  echo Activate your conda or venv environment first, or set:
+  echo   IPOD_THEME_RUNTIME_SRC=full_path_to_python_runtime
+  echo.
+  echo Examples:
+  echo   conda activate ipod_theme
+  echo   build_portable_bundle.bat
+  echo.
+  pause
+  exit /b 1
+)
+
+if not exist "%RUNTIME_SRC%\python.exe" (
+  echo Detected runtime root is invalid:
+  echo   %RUNTIME_SRC%
+  echo.
+  echo Expected to find python.exe under that directory.
+  pause
+  exit /b 1
+)
 
 echo Preparing portable bundle at:
 echo   %BUNDLE_ROOT%
+echo Using Python runtime from:
+echo   %RUNTIME_SRC%
 
 if exist "%BUNDLE_ROOT%" rmdir /s /q "%BUNDLE_ROOT%"
 
@@ -44,14 +75,41 @@ echo Writing portable launcher...
 (
   echo @echo off
   echo setlocal
-  echo cd /d "%%~dp0"
+  echo set "APP_ROOT=%%~dp0"
+  echo pushd "%%APP_ROOT%%"
   echo.
-  echo set "RUNTIME=%%~dp0runtime\python"
-  echo set "PATH=%%RUNTIME%%;%%RUNTIME%%\Library\bin;%%RUNTIME%%\Scripts;%%PATH%%"
-  echo set "PYTHONHOME=%%RUNTIME%%"
+  echo set "RUNTIME=%%APP_ROOT%%runtime\python"
+  echo set "SCRIPT_PATH=%%APP_ROOT%%theme_studio.py"
+  echo set "PYTHONEXE=%%RUNTIME%%\python.exe"
+  echo set "PYTHONPATH="
+  echo set "PYTHONHOME="
+  echo set "PYTHONEXECUTABLE="
   echo set "PYTHONNOUSERSITE=1"
+  echo set "CONDA_PREFIX="
+  echo set "CONDA_DEFAULT_ENV="
+  echo set "VIRTUAL_ENV="
+  echo set "PATH=%%RUNTIME%%;%%RUNTIME%%\Library\bin;%%RUNTIME%%\Scripts;%%PATH%%"
   echo.
-  echo "%%RUNTIME%%\python.exe" theme_studio.py
+  echo if not exist "%%PYTHONEXE%%" ^(
+  echo   echo Portable runtime not found: %%PYTHONEXE%%
+  echo   pause
+  echo   popd
+  echo   endlocal
+  echo   exit /b 1
+  echo ^)
+  echo.
+  echo "%%PYTHONEXE%%" "%%SCRIPT_PATH%%"
+  echo if errorlevel 1 ^(
+  echo   echo.
+  echo   echo Failed to launch iPod Theme Studio.
+  echo   echo App root: %%APP_ROOT%%
+  echo   echo Runtime: %%PYTHONEXE%%
+  echo   pause
+  echo   popd
+  echo   endlocal
+  echo   exit /b 1
+  echo ^)
+  echo popd
   echo endlocal
 ) > "%BUNDLE_ROOT%\launch_theme_studio_portable.bat"
 
@@ -71,4 +129,24 @@ exit /b 0
 
 :copyfail
 echo Failed to copy files into the portable bundle.
+pause
 exit /b 1
+
+:detect_runtime_from_path
+for /f "usebackq delims=" %%P in (`where python 2^>nul`) do (
+  echo %%P | findstr /I /C:"WindowsApps" >nul
+  if errorlevel 1 (
+    if exist "%%~dpPpython.exe" (
+      if exist "%%~dpPLib" (
+        echo %%~dpP | findstr /I /C:"\\anaconda3\\" >nul
+        if not errorlevel 1 (
+          rem Skip conda base unless the user explicitly pointed to it.
+        ) else (
+        set "RUNTIME_SRC=%%~dpP"
+        goto :eof
+        )
+      )
+    )
+  )
+)
+goto :eof
