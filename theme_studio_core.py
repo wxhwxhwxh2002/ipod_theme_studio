@@ -108,12 +108,33 @@ ARTWORK_GROUPS = [
 SUPPORTED_TTC_CHILDREN = {
     "STHeiti-Medium.ttc": [
         {
+            "member_index": 0,
+            "member_name": "Heiti TC",
+            "slot_id": "STHeiti-Medium.ttc::Heiti TC",
+            "display_name": "STHeiti-Medium.ttc / Heiti TC",
+            "hint": "繁体中文字体槽位",
+        },
+        {
             "member_index": 1,
             "member_name": "Heiti SC",
             "slot_id": "STHeiti-Medium.ttc::Heiti SC",
             "display_name": "STHeiti-Medium.ttc / Heiti SC",
-            "hint": "简体中文主字体候选（当前唯一支持的 TTC 子字体替换入口）",
-        }
+            "hint": "简体中文主字体槽位",
+        },
+        {
+            "member_index": 2,
+            "member_name": "Heiti K",
+            "slot_id": "STHeiti-Medium.ttc::Heiti K",
+            "display_name": "STHeiti-Medium.ttc / Heiti K",
+            "hint": "韩文相关字体槽位",
+        },
+        {
+            "member_index": 3,
+            "member_name": "Heiti J",
+            "slot_id": "STHeiti-Medium.ttc::Heiti J",
+            "display_name": "STHeiti-Medium.ttc / Heiti J",
+            "hint": "日文相关字体槽位",
+        },
     ]
 }
 
@@ -749,7 +770,8 @@ class ThemeStudio:
                 for container_name, children in SUPPORTED_TTC_CHILDREN.items():
                     if container_name not in inventory_names:
                         continue
-                    if not any(str(item.get("slot_id", "")) == child["slot_id"] for child in children for item in inventory):
+                    child_slot_ids = {str(item.get("slot_id", "")) for item in inventory}
+                    if not all(child["slot_id"] in child_slot_ids for child in children):
                         needs_rescan = True
                         break
         if (not inventory or needs_rescan) and WORK_RSRC_BASE.exists():

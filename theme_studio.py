@@ -2167,7 +2167,7 @@ class FontSlotBrowserDialog:
         replace_count = sum(1 for item in items if item["status"] == "已指定替换")
         self.summary_var.set(
             f"当前固件中检测到 {len(items)} 个字体槽位，其中已指定替换 {replace_count} 个。"
-            " v1 只支持 .ttf 替换；.ttc / .otf 仅展示，不提供写回。"
+            " 当前支持普通 .ttf 槽位，以及 STHeiti-Medium.ttc 的 Heiti TC / SC / K / J 成员槽位。"
         )
 
         for item in items:
