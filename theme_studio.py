@@ -22,7 +22,17 @@ except ImportError:  # pragma: no cover - optional runtime acceleration
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
-from theme_studio_core import APP_ROOT, ThemeStudio, StudioError, WORK_INPUTS, _detect_saved_artwork_format
+from theme_studio_core import (
+    APP_ROOT,
+    EXPERIMENTAL_FONT_MODE,
+    EXPERIMENTAL_HEITI_SC_SLOT,
+    SAFE_FONT_MODE,
+    ThemeStudio,
+    StudioError,
+    WORK_INPUTS,
+    _detect_saved_artwork_format,
+    _font_mode_label,
+)
 
 
 BG = "#edf2f7"
@@ -4602,6 +4612,340 @@ def _theme_studio_show_about(self) -> None:
     ).pack(side="right")
 
 
+def _font_slot_default_warning() -> str:
+    return (
+        "默认推荐“安全写入”：先用 FontForge 等工具手工处理字体，再交给 GUI 写入槽位。"
+        " “实验性自动处理”当前只对 STHeiti-Medium.ttc / Heiti SC 开放，不保证任意中文 TTF 都能成功。"
+    )
+
+
+def _font_slot_format_bytes(size: int | str | None) -> str:
+    try:
+        value = int(size or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value <= 0:
+        return "-"
+    return f"{value / (1024 * 1024):.2f} MB"
+
+
+def _font_slot_build_layout(self) -> None:
+    container = tk.Frame(self.dialog, bg=CARD, padx=18, pady=18)
+    container.pack(fill="both", expand=True, padx=16, pady=16)
+    container.rowconfigure(2, weight=1)
+    container.columnconfigure(0, weight=1)
+    container.columnconfigure(1, weight=0)
+
+    tk.Label(container, text="字体槽位", bg=CARD, fg=TEXT, font=ui_font(17, bold=True)).grid(
+        row=0, column=0, columnspan=2, sticky="w"
+    )
+    tk.Label(
+        container,
+        textvariable=self.summary_var,
+        bg=CARD,
+        fg=MUTED,
+        justify="left",
+        wraplength=920,
+        font=ui_font(10),
+    ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+    list_card = tk.Frame(container, bg=CARD)
+    list_card.grid(row=2, column=0, sticky="nsew", pady=(14, 0))
+    list_card.rowconfigure(0, weight=1)
+    list_card.columnconfigure(0, weight=1)
+
+    columns = ("name", "extension", "status")
+    self.font_tree = ttk.Treeview(list_card, columns=columns, show="headings")
+    self.font_tree.heading("name", text="文件名")
+    self.font_tree.heading("extension", text="扩展名")
+    self.font_tree.heading("status", text="状态")
+    self.font_tree.column("name", width=340, anchor="w")
+    self.font_tree.column("extension", width=90, anchor="center")
+    self.font_tree.column("status", width=120, anchor="center")
+    self.font_tree.grid(row=0, column=0, sticky="nsew")
+    self.font_tree.bind("<<TreeviewSelect>>", self._on_item_selected)
+
+    scrollbar = ttk.Scrollbar(list_card, orient="vertical", command=self.font_tree.yview)
+    self.font_tree.configure(yscrollcommand=scrollbar.set)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+
+    detail_card = tk.Frame(container, bg="#f7f1e7", padx=14, pady=14)
+    detail_card.grid(row=2, column=1, sticky="ns", padx=(16, 0), pady=(14, 0))
+
+    tk.Label(detail_card, text="当前槽位详情", bg="#f7f1e7", fg=TEXT, font=ui_font(12, bold=True)).pack(anchor="w")
+    self.detail_label = tk.Label(
+        detail_card,
+        textvariable=self.detail_var,
+        bg="#f7f1e7",
+        fg=TEXT,
+        justify="left",
+        anchor="w",
+        wraplength=340,
+        font=("Consolas", 10),
+    )
+    self.detail_label.pack(fill="x", pady=(12, 0))
+
+    self.warning_label = tk.Label(
+        detail_card,
+        textvariable=self.warning_var,
+        bg="#f7f1e7",
+        fg=MUTED,
+        justify="left",
+        wraplength=340,
+        font=ui_font(10),
+    )
+    self.warning_label.pack(fill="x", pady=(12, 0))
+
+    buttons = tk.Frame(container, bg=CARD)
+    buttons.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+
+    self.replace_button = tk.Button(
+        buttons,
+        text="写入已处理字体",
+        command=self._choose_replacement,
+        **button_style("primary"),
+        relief="flat",
+        bd=0,
+        padx=14,
+        pady=9,
+        font=ui_font(10, bold=True),
+    )
+    self.replace_button.pack(side="left")
+
+    self.experimental_button = tk.Button(
+        buttons,
+        text="实验性自动处理后写入",
+        command=self._choose_experimental_replacement,
+        **button_style("secondary"),
+        relief="flat",
+        bd=0,
+        padx=14,
+        pady=9,
+        font=ui_font(10, bold=True),
+    )
+    self.experimental_button.pack(side="left", padx=(10, 0))
+
+    self.clear_button = tk.Button(
+        buttons,
+        text="清除替换",
+        command=self._clear_replacement,
+        **button_style("secondary"),
+        relief="flat",
+        bd=0,
+        padx=14,
+        pady=9,
+        font=ui_font(10, bold=True),
+    )
+    self.clear_button.pack(side="left", padx=(10, 0))
+
+    self.export_button = tk.Button(
+        buttons,
+        text="导出当前字体",
+        command=self._export_current_font,
+        **button_style("secondary"),
+        relief="flat",
+        bd=0,
+        padx=14,
+        pady=9,
+        font=ui_font(10, bold=True),
+    )
+    self.export_button.pack(side="left", padx=(10, 0))
+
+    tk.Button(
+        buttons,
+        text="打开字体暂存目录",
+        command=self._open_staging_dir,
+        **button_style("secondary"),
+        relief="flat",
+        bd=0,
+        padx=14,
+        pady=9,
+        font=ui_font(10, bold=True),
+    ).pack(side="left", padx=(10, 0))
+
+    tk.Button(
+        buttons,
+        text="刷新列表",
+        command=self._load_items,
+        **button_style("secondary"),
+        relief="flat",
+        bd=0,
+        padx=14,
+        pady=9,
+        font=ui_font(10, bold=True),
+    ).pack(side="left", padx=(10, 0))
+
+    tk.Button(
+        buttons,
+        text="关闭",
+        command=self.dialog.destroy,
+        **button_style("secondary"),
+        relief="flat",
+        bd=0,
+        padx=14,
+        pady=9,
+        font=ui_font(10, bold=True),
+    ).pack(side="right")
+
+
+def _font_slot_load_items(self, keep_name: str | None = None) -> None:
+    selected = keep_name if keep_name is not None else self._selected_name()
+    self.font_tree.delete(*self.font_tree.get_children())
+    items = self.studio.list_fonts()
+    self.items_by_name = {str(item["name"]): item for item in items}
+
+    replace_count = sum(1 for item in items if item["status"] == "已指定替换")
+    experimental_count = sum(
+        1
+        for item in items
+        if str(item.get("replacement_info", {}).get("mode", "")) == EXPERIMENTAL_FONT_MODE
+    )
+    self.summary_var.set(
+        f"当前固件中检测到 {len(items)} 个字体槽位，其中已指定替换 {replace_count} 个。"
+        f" 默认推荐“安全写入”；Heiti SC 当前有 {experimental_count} 个实验模式暂存项。"
+    )
+
+    for item in items:
+        self.font_tree.insert(
+            "",
+            "end",
+            iid=str(item["name"]),
+            values=(item.get("display_name", item["name"]), item["extension"], item["status"]),
+        )
+
+    if not items:
+        self.detail_var.set("当前还没有可用的字体工作区。\n请先导入官方固件或社区 IPSW。")
+        self.warning_var.set(_font_slot_default_warning())
+        self._update_button_state(None)
+        return
+
+    chosen = selected if selected in self.items_by_name else str(items[0]["name"])
+    self.font_tree.selection_set(chosen)
+    self.font_tree.focus(chosen)
+    self.font_tree.see(chosen)
+    self._on_item_selected()
+
+
+def _font_slot_update_button_state(self, item: dict[str, object] | None) -> None:
+    if not item:
+        self.replace_button.configure(state="disabled")
+        self.experimental_button.configure(state="disabled")
+        self.clear_button.configure(state="disabled")
+        self.export_button.configure(state="disabled")
+        return
+
+    supported = bool(item.get("supported"))
+    has_replacement = bool(item.get("replacement_path"))
+    slot_name = str(item.get("name", ""))
+    self.replace_button.configure(state="normal" if supported else "disabled")
+    self.experimental_button.configure(
+        state="normal" if slot_name == EXPERIMENTAL_HEITI_SC_SLOT and supported else "disabled"
+    )
+    self.clear_button.configure(state="normal" if supported and has_replacement else "disabled")
+    self.export_button.configure(state="normal")
+
+
+def _font_slot_on_item_selected(self, _event=None) -> None:
+    slot_name = self._selected_name()
+    item = self.items_by_name.get(slot_name or "")
+    if not item:
+        self.detail_var.set("请先从左侧列表选择一个字体槽位。")
+        self.warning_var.set(_font_slot_default_warning())
+        self._update_button_state(None)
+        return
+
+    replacement_info = dict(item.get("replacement_info", {}))
+    replacement_path = str(item.get("replacement_path", "")) or "-"
+    mode = str(replacement_info.get("mode", SAFE_FONT_MODE))
+    mode_label = _font_mode_label(mode)
+    lines = [
+        f"槽位:       {item.get('display_name', item.get('name', ''))}",
+        f"用途:       {item.get('hint', '') or '-'}",
+        f"状态:       {item.get('status', '-')}",
+        f"写入方式:   {mode_label if replacement_path != '-' else '未设置'}",
+        f"替换文件:   {replacement_path}",
+        f"风险等级:   {replacement_info.get('risk_level', '-')}",
+        f"源字体:     {_font_slot_format_bytes(replacement_info.get('source_size_bytes'))} / {replacement_info.get('source_glyph_count', '-')} glyph",
+        f"暂存后:     {_font_slot_format_bytes(replacement_info.get('staged_size_bytes'))} / {replacement_info.get('staged_glyph_count', '-')} glyph",
+        f"目标槽位:   {_font_slot_format_bytes(replacement_info.get('target_size_bytes'))} / {replacement_info.get('target_glyph_count', '-')} glyph",
+    ]
+    subset_profile = str(replacement_info.get("subset_profile", ""))
+    if subset_profile:
+        lines.append(f"实验字集:   {subset_profile}")
+    self.detail_var.set("\n".join(lines))
+
+    warning_lines: list[str] = []
+    if item.get("name") == EXPERIMENTAL_HEITI_SC_SLOT:
+        warning_lines.append("Heiti SC 是当前简体中文主槽位。安全写入推荐使用手工处理好的字体；实验模式只做有限自动预处理。")
+    elif str(item.get("kind")) == "ttc-member":
+        warning_lines.append("当前是 STHeiti-Medium.ttc 的 member 槽位。默认建议写入已手工处理好的字体。")
+    elif bool(item.get("supported")):
+        warning_lines.append("当前是普通 .ttf 槽位，默认按上游兼容方式写回。")
+    else:
+        warning_lines.append("当前槽位只读展示，不支持替换。")
+
+    for note in replacement_info.get("notes", []) or []:
+        warning_lines.append(f"说明：{note}")
+    for warning in replacement_info.get("warnings", []) or []:
+        warning_lines.append(f"提示：{warning}")
+    if not replacement_info:
+        warning_lines.append(_font_slot_default_warning())
+
+    self.warning_var.set("\n".join(warning_lines))
+    self._update_button_state(item)
+
+
+def _font_slot_choose_replacement(self) -> None:
+    slot_name = self._selected_name()
+    item = self.items_by_name.get(slot_name or "")
+    if not item or not bool(item.get("supported")):
+        messagebox.showinfo("当前槽位不可替换", "当前只能对可替换的 .ttf 或 STHeiti member 槽位写入字体。", parent=self.dialog)
+        return
+
+    source = filedialog.askopenfilename(
+        title=f"为 {slot_name} 选择已处理字体",
+        filetypes=[("TrueType font", "*.ttf"), ("All files", "*.*")],
+    )
+    if not source:
+        return
+
+    try:
+        staged_path = self.studio.stage_font_replacement(slot_name, Path(source), mode=SAFE_FONT_MODE)
+    except StudioError as exc:
+        messagebox.showerror("暂存字体失败", str(exc), parent=self.dialog)
+        return
+
+    if self.log_callback is not None:
+        self.log_callback(f"已为字体槽位暂存已处理字体：{slot_name} <- {Path(source).name}")
+        self.log_callback(f"字体暂存位置：{staged_path}")
+    self._load_items(keep_name=slot_name)
+
+
+def _font_slot_choose_experimental_replacement(self) -> None:
+    slot_name = self._selected_name()
+    if slot_name != EXPERIMENTAL_HEITI_SC_SLOT:
+        messagebox.showinfo("当前槽位不支持实验模式", "实验性自动处理当前只对 Heiti SC 开放。", parent=self.dialog)
+        return
+
+    source = filedialog.askopenfilename(
+        title="为 Heiti SC 选择要实验性自动处理的字体",
+        filetypes=[("TrueType font", "*.ttf"), ("All files", "*.*")],
+    )
+    if not source:
+        return
+
+    try:
+        staged_path = self.studio.stage_font_replacement(slot_name, Path(source), mode=EXPERIMENTAL_FONT_MODE)
+    except StudioError as exc:
+        messagebox.showerror("实验性预处理失败", str(exc), parent=self.dialog)
+        return
+
+    if self.log_callback is not None:
+        self.log_callback(f"已为 Heiti SC 暂存实验性自动处理字体：{slot_name} <- {Path(source).name}")
+        self.log_callback(f"字体暂存位置：{staged_path}")
+    self._load_items(keep_name=slot_name)
+
+
 SavedAssetBrowserDialog._delete_selected = _saved_asset_browser_delete_selected
 ThemeStudioApp._prepare_replacement_candidate = _theme_studio_prepare_replacement_candidate
 ThemeStudioApp._choose_replacement_candidate = _theme_studio_choose_replacement_candidate
@@ -4609,6 +4953,12 @@ ThemeStudioApp._import_file_to_saved_assets = _theme_studio_import_file_to_saved
 ThemeStudioApp._reduce_saved_library_asset = _theme_studio_reduce_saved_library_asset
 ThemeStudioApp._reduce_color_and_replace = _theme_studio_reduce_color_and_replace
 ThemeStudioApp._show_about = _theme_studio_show_about
+FontSlotBrowserDialog._build_layout = _font_slot_build_layout
+FontSlotBrowserDialog._load_items = _font_slot_load_items
+FontSlotBrowserDialog._update_button_state = _font_slot_update_button_state
+FontSlotBrowserDialog._on_item_selected = _font_slot_on_item_selected
+FontSlotBrowserDialog._choose_replacement = _font_slot_choose_replacement
+FontSlotBrowserDialog._choose_experimental_replacement = _font_slot_choose_experimental_replacement
 
 
 def main() -> None:

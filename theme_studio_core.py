@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 import copy
@@ -9,12 +10,14 @@ import contextlib
 import io
 import json
 import shutil
+import struct
 import sys
 import urllib.request
 import zipfile
 
 from PIL import Image
-from fontTools import ttLib
+from fontTools import subset, ttLib
+from fontTools.ttLib.ttCollection import readTTCHeader
 from pyfatfs import PyFatFS
 
 from ipodhax.silverdb import pack_silverdb, unpack_silverdb
@@ -99,6 +102,9 @@ DEVICE_PROFILES = {
 
 ARTWORK_GROUPS = [
     {"key": "all", "label": "全部素材", "devices": None},
+    {"key": "n6-icons", "label": "Nano 6 图标", "devices": {"nano6"}},
+    {"key": "n6-wallpapers", "label": "Nano 6 壁纸（全部）", "devices": {"nano6"}},
+    {"key": "n6-wallpapers-thumb", "label": "Nano 6 仅缩略图", "devices": {"nano6"}},
     {"key": "n7-icons", "label": "Nano 7 图标", "devices": {"nano7-2012", "nano7-2015"}},
     {"key": "n7-wallpapers", "label": "Nano 7 壁纸（全部）", "devices": {"nano7-2012", "nano7-2015"}},
     {"key": "n7-wallpapers-full", "label": "Nano 7 壁纸（240x432）", "devices": {"nano7-2012", "nano7-2015"}},
@@ -137,6 +143,11 @@ SUPPORTED_TTC_CHILDREN = {
         },
     ]
 }
+
+SAFE_FONT_MODE = "safe"
+EXPERIMENTAL_FONT_MODE = "experimental"
+EXPERIMENTAL_HEITI_SC_SLOT = "STHeiti-Medium.ttc::Heiti SC"
+HEITI_SC_SUBSET_PROFILE = "2000 常用简中字 + 假名 + Latin + 常用标点"
 
 
 @dataclass
@@ -234,7 +245,7 @@ def _save_font_inventory(items: list[dict[str, object]]) -> None:
     WORK_FONT_INVENTORY.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _load_font_replacements() -> dict[str, dict[str, str]]:
+def _load_font_replacements() -> dict[str, dict[str, object]]:
     if not WORK_FONT_REPLACEMENTS.exists():
         return {}
     try:
@@ -244,19 +255,24 @@ def _load_font_replacements() -> dict[str, dict[str, str]]:
     if not isinstance(data, dict):
         return {}
 
-    normalized: dict[str, dict[str, str]] = {}
+    normalized: dict[str, dict[str, object]] = {}
     for slot_name, entry in data.items():
         if isinstance(entry, str):
             normalized[slot_name] = {"source_path": entry, "staged_path": entry}
         elif isinstance(entry, dict):
-            source_path = str(entry.get("source_path", ""))
-            staged_path = str(entry.get("staged_path", ""))
+            normalized_entry = dict(entry)
+            source_path = str(normalized_entry.get("source_path", ""))
+            staged_path = str(normalized_entry.get("staged_path", ""))
             if source_path or staged_path:
-                normalized[slot_name] = {"source_path": source_path, "staged_path": staged_path}
+                normalized_entry["source_path"] = source_path
+                normalized_entry["staged_path"] = staged_path
+                if not normalized_entry.get("mode"):
+                    normalized_entry["mode"] = SAFE_FONT_MODE
+                normalized[slot_name] = normalized_entry
     return normalized
 
 
-def _save_font_replacements(data: dict[str, dict[str, str]]) -> None:
+def _save_font_replacements(data: dict[str, dict[str, object]]) -> None:
     WORK_FONT_REPLACEMENTS.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -310,6 +326,248 @@ def _scan_font_slots(rsrc_path: Path) -> list[dict[str, object]]:
                 }
             )
     return items
+
+
+@lru_cache(maxsize=1)
+def _default_heiti_sc_subset_text() -> str:
+    chars = set(chr(codepoint) for codepoint in range(32, 127))
+    chars.update(
+        "，。、；：？！“”‘’（）【】《》〈〉「」『』—…·￥％＃＠＆＊"
+        "＋＝－＿／＼|~`^<>"
+    )
+    for high in range(0xA1, 0xAA):
+        for low in range(0xA1, 0xFF):
+            try:
+                chars.update(bytes([high, low]).decode("gb2312"))
+            except UnicodeDecodeError:
+                continue
+    common_sc: list[str] = []
+    for high in range(0xB0, 0xD8):
+        for low in range(0xA1, 0xFF):
+            try:
+                decoded = bytes([high, low]).decode("gb2312")
+            except UnicodeDecodeError:
+                continue
+            if "\u4e00" <= decoded <= "\u9fff":
+                common_sc.append(decoded)
+    chars.update(common_sc[:2000])
+    chars.update(chr(codepoint) for codepoint in range(0x3040, 0x30FF + 1))
+    chars.update(chr(codepoint) for codepoint in range(0x31F0, 0x31FF + 1))
+    chars.update(chr(codepoint) for codepoint in range(0xFF66, 0xFF9D + 1))
+    return "".join(sorted(chars))
+
+
+def _vendor_id(font: ttLib.TTFont) -> str:
+    if "OS/2" not in font:
+        return ""
+    value = getattr(font["OS/2"], "achVendID", "")
+    if isinstance(value, bytes):
+        return value.decode("ascii", "ignore").strip()
+    return str(value).strip()
+
+
+def _font_analysis(font: ttLib.TTFont, *, size_bytes: int = 0) -> dict[str, object]:
+    family = ""
+    if "name" in font:
+        for name_id in (16, 1):
+            with contextlib.suppress(Exception):
+                family = font["name"].getDebugName(name_id) or ""
+            if family:
+                break
+    return {
+        "size_bytes": int(size_bytes),
+        "glyph_count": int(getattr(font["maxp"], "numGlyphs", 0)) if "maxp" in font else 0,
+        "units_per_em": int(getattr(font["head"], "unitsPerEm", 0)) if "head" in font else 0,
+        "vendor_id": _vendor_id(font),
+        "table_names": sorted(str(tag) for tag in font.keys()),
+        "family_name": family,
+    }
+
+
+def _analyze_font_file(path: Path) -> dict[str, object]:
+    font = ttLib.TTFont(str(path))
+    try:
+        return _font_analysis(font, size_bytes=path.stat().st_size)
+    finally:
+        font.close()
+
+
+def _apply_target_font_identity(working_font: ttLib.TTFont, target_font: ttLib.TTFont) -> None:
+    if "name" in target_font:
+        working_font["name"] = copy.deepcopy(target_font["name"])
+    if "OS/2" in working_font and "OS/2" in target_font:
+        with contextlib.suppress(Exception):
+            working_font["OS/2"].achVendID = copy.deepcopy(target_font["OS/2"].achVendID)
+
+
+def _read_font_slot_bytes(rsrc_path: Path, slot: dict[str, object]) -> bytes:
+    container_name = str(slot.get("container_name") or slot.get("name", ""))
+    fs_path = f"/Resources/Fonts/{container_name}"
+    fat = PyFatFS.PyFatFS(str(rsrc_path), read_only=False)
+    try:
+        with fat.openbin(fs_path, mode="rb") as stream:
+            data = stream.read()
+    finally:
+        fat.close()
+
+    if str(slot.get("kind", "file")) != "ttc-member":
+        return data
+
+    collection = ttLib.TTCollection(io.BytesIO(data))
+    try:
+        member_index = int(slot.get("member_index", 0))
+        output = io.BytesIO()
+        collection.fonts[member_index].save(output)
+        return output.getvalue()
+    finally:
+        collection.close()
+
+
+def _read_font_container_bytes(rsrc_path: Path, container_name: str) -> bytes:
+    fs_path = f"/Resources/Fonts/{container_name}"
+    fat = PyFatFS.PyFatFS(str(rsrc_path), read_only=False)
+    try:
+        with fat.openbin(fs_path, mode="rb") as stream:
+            return stream.read()
+    finally:
+        fat.close()
+
+
+def _ttc_member_window_bytes(ttc_bytes: bytes, member_index: int) -> int:
+    header = readTTCHeader(io.BytesIO(ttc_bytes))
+    offsets = sorted(int(offset) for offset in getattr(header, "offsetTable"))
+    current_offset = int(getattr(header, "offsetTable")[member_index])
+    next_offsets = [offset for offset in offsets if offset > current_offset]
+    version = int.from_bytes(ttc_bytes[4:8], "big")
+    if version == 0x00020000:
+        dsig_offset = int.from_bytes(ttc_bytes[12 + len(offsets) * 4 + 8 : 12 + len(offsets) * 4 + 12], "big")
+        if dsig_offset > current_offset:
+            next_offsets.append(dsig_offset)
+    current_limit = min(next_offsets) if next_offsets else len(ttc_bytes)
+    return max(0, current_limit - current_offset)
+
+
+def _replace_ttc_member_preserving_shell(ttc_bytes: bytes, member_index: int, replacement_font: ttLib.TTFont) -> bytes:
+    header = readTTCHeader(io.BytesIO(ttc_bytes))
+    offset_table = list(getattr(header, "offsetTable"))
+    current_offset = int(offset_table[member_index])
+    offset_entry_pos = 12 + member_index * 4
+
+    size_probe = io.BytesIO()
+    replacement_font._save(size_probe)
+    replacement_size = len(size_probe.getvalue())
+
+    version = int.from_bytes(ttc_bytes[4:8], "big")
+    next_offsets = sorted(offset for offset in offset_table if offset > current_offset)
+    if version == 0x00020000:
+        dsig_offset = int.from_bytes(ttc_bytes[12 + len(offset_table) * 4 + 8 : 12 + len(offset_table) * 4 + 12], "big")
+        if dsig_offset > current_offset:
+            next_offsets.append(dsig_offset)
+    current_limit = min(next_offsets) if next_offsets else len(ttc_bytes)
+    if replacement_size <= current_limit - current_offset:
+        buffer = io.BytesIO()
+        buffer.write(ttc_bytes)
+        buffer.seek(current_offset)
+        replacement_font._save(buffer)
+        return buffer.getvalue()
+
+    buffer = io.BytesIO()
+    buffer.write(ttc_bytes)
+    while buffer.tell() % 4 != 0:
+        buffer.write(b"\x00")
+
+    new_member_offset = buffer.tell()
+    buffer.seek(new_member_offset)
+    replacement_font._save(buffer)
+    output = bytearray(buffer.getvalue())
+    struct.pack_into(">L", output, offset_entry_pos, new_member_offset)
+    return bytes(output)
+
+
+def _subset_font_to_text(source_path: Path, output_path: Path, text: str) -> None:
+    options = subset.Options()
+    options.name_IDs = ["*"]
+    options.name_languages = ["*"]
+    options.name_legacy = True
+    options.layout_features = ["*"]
+    options.notdef_glyph = True
+    options.notdef_outline = True
+    options.recommended_glyphs = True
+    options.symbol_cmap = True
+
+    font = subset.load_font(str(source_path), options)
+    try:
+        subsetter = subset.Subsetter(options=options)
+        subsetter.populate(text=text)
+        subsetter.subset(font)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output = io.BytesIO()
+        subset.save_font(font, output, options)
+        output_path.write_bytes(output.getvalue())
+    finally:
+        font.close()
+
+
+def _build_font_import_report(
+    slot: dict[str, object],
+    source_info: dict[str, object],
+    target_info: dict[str, object],
+    staged_info: dict[str, object],
+    *,
+    mode: str,
+    member_window_bytes: int | None = None,
+) -> tuple[list[str], list[str], str]:
+    notes: list[str] = []
+    warnings: list[str] = []
+    target_size = int(target_info.get("size_bytes", 0))
+    staged_size = int(staged_info.get("size_bytes", 0))
+    target_glyphs = int(target_info.get("glyph_count", 0))
+    staged_glyphs = int(staged_info.get("glyph_count", 0))
+
+    if mode == SAFE_FONT_MODE:
+        notes.append("安全写入不会自动修复字体结构；推荐导入已用 FontForge 等工具处理过的字体。")
+    else:
+        notes.append(f"实验模式已按 {HEITI_SC_SUBSET_PROFILE} 自动裁剪字集，并继承 Heiti SC 槽位身份。")
+        warnings.append("实验模式只针对 Heiti SC，不能保证任意中文 TTF 都能成功刷机。")
+
+    if str(slot.get("kind", "")) == "ttc-member":
+        warnings.append("TTC 成员写入会保留原 STHeiti-Medium.ttc 外壳，只替换当前 member。")
+        if member_window_bytes is not None and staged_size > member_window_bytes:
+            warnings.append(
+                f"当前 member 在原 TTC 中只有 {_format_bytes(member_window_bytes)} 的独占空间；"
+                "这个字体会迫使整个 TTC 变大，刷机失败风险较高。"
+            )
+
+    if mode == SAFE_FONT_MODE and str(slot.get("kind", "")) == "ttc-member":
+        warnings.append("安全写入默认假设你导入的是已经手工处理好的字体。")
+
+    if target_size and staged_size > target_size * 1.5:
+        warnings.append("处理后的字体明显大于原槽位，刷机失败风险更高。")
+    elif target_size and staged_size > target_size:
+        warnings.append("处理后的字体大于原槽位，建议关注 rsrc 空间占用。")
+
+    if target_glyphs and staged_glyphs and staged_glyphs < max(1500, target_glyphs // 5):
+        warnings.append("当前字形覆盖明显少于原槽位，生僻字或媒体库标题可能缺字。")
+
+    if target_info.get("vendor_id") and staged_info.get("vendor_id") != target_info.get("vendor_id"):
+        warnings.append("字体厂商 ID 与目标槽位不同，兼容性可能较差。")
+
+    risk_score = 0
+    if mode == EXPERIMENTAL_FONT_MODE:
+        risk_score += 1
+    if member_window_bytes is not None and staged_size > member_window_bytes:
+        risk_score += 3
+    if target_size and staged_size > target_size:
+        risk_score += 1
+    if target_size and staged_size > target_size * 1.5:
+        risk_score += 1
+    if target_glyphs and staged_glyphs and staged_glyphs < max(1500, target_glyphs // 5):
+        risk_score += 1
+    if target_info.get("vendor_id") and staged_info.get("vendor_id") != target_info.get("vendor_id"):
+        risk_score += 1
+
+    risk_level = "高" if risk_score >= 3 else "中" if risk_score >= 1 else "低"
+    return notes, warnings, risk_level
 
 
 def _parse_artwork_filename(path: Path) -> tuple[str, str]:
@@ -804,11 +1062,12 @@ class ThemeStudio:
                     "member_index": item.get("member_index"),
                     "member_name": str(item.get("member_name", "")),
                     "hint": str(item.get("hint", "")),
+                    "replacement_info": replacement,
                 }
             )
         return items
 
-    def stage_font_replacement(self, slot_name: str, source_path: Path) -> Path:
+    def stage_font_replacement(self, slot_name: str, source_path: Path, mode: str = SAFE_FONT_MODE) -> Path:
         slot = next((item for item in self.list_fonts() if item["name"] == slot_name), None)
         if slot is None:
             raise StudioError(f"没有找到字体槽位：{slot_name}")
@@ -968,6 +1227,16 @@ class ThemeStudio:
         item_id = int(item["id"])
         size = item["size"]
 
+        if device_key == "nano6":
+            if group_key == "n6-icons":
+                return 229442241 <= item_id <= 229442314
+            if group_key == "n6-wallpapers":
+                return 229442315 <= item_id <= 229442371
+            if group_key == "n6-wallpapers-thumb":
+                return 229442338 <= item_id <= 229442352 or (
+                    229442353 <= item_id <= 229442371 and item_id % 2 == 1
+                )
+
         if device_key in {"nano7-2012", "nano7-2015"}:
             if group_key == "n7-icons":
                 return 229442200 <= item_id <= 229442211
@@ -982,6 +1251,16 @@ class ThemeStudio:
 
     def describe_artwork_group(self, item: dict[str, str], device_key: str | None = None) -> str:
         resolved_device = device_key or self.load_session().device_key
+        if resolved_device == "nano6":
+            if self._item_matches_group(resolved_device, item, "n6-icons"):
+                return "Nano 6 图标"
+            item_id = int(item["id"])
+            if 229442315 <= item_id <= 229442337 or (229442353 <= item_id <= 229442371 and item_id % 2 == 0):
+                return "Nano 6 壁纸"
+            if self._item_matches_group(resolved_device, item, "n6-wallpapers-thumb"):
+                return "Nano 6 壁纸缩略图"
+            if self._item_matches_group(resolved_device, item, "n6-wallpapers"):
+                return "Nano 6 壁纸相关"
         if resolved_device in {"nano7-2012", "nano7-2015"}:
             if self._item_matches_group(resolved_device, item, "n7-icons"):
                 return "Nano 7 图标"
@@ -1356,3 +1635,250 @@ class ThemeStudio:
     def saved_assets_dir(self) -> Path:
         SAVED_ROOT.mkdir(parents=True, exist_ok=True)
         return SAVED_ROOT
+
+
+def _font_mode_label(mode: str) -> str:
+    if mode == EXPERIMENTAL_FONT_MODE:
+        return "实验性自动处理（仅 Heiti SC）"
+    return "安全写入"
+
+
+def _theme_studio_list_fonts(self: ThemeStudio) -> list[dict[str, object]]:
+    inventory = _load_font_inventory()
+    needs_rescan = False
+    if inventory:
+        if any("slot_id" not in item for item in inventory):
+            needs_rescan = True
+        else:
+            inventory_names = {str(item.get("container_name", "")) for item in inventory} | {
+                str(item.get("name", "")) for item in inventory
+            }
+            for container_name, children in SUPPORTED_TTC_CHILDREN.items():
+                if container_name not in inventory_names:
+                    continue
+                child_slot_ids = {str(item.get("slot_id", "")) for item in inventory}
+                if not all(child["slot_id"] in child_slot_ids for child in children):
+                    needs_rescan = True
+                    break
+    if (not inventory or needs_rescan) and WORK_RSRC_BASE.exists():
+        inventory = _scan_font_slots(WORK_RSRC_BASE)
+        _save_font_inventory(inventory)
+
+    replacements = _load_font_replacements()
+    items: list[dict[str, object]] = []
+    for item in inventory:
+        slot_name = str(item.get("slot_id", item.get("name", "")))
+        replacement = replacements.get(slot_name, {})
+        replacement_path = str(replacement.get("source_path", "") or replacement.get("staged_path", ""))
+        supported = bool(item.get("supported"))
+        if replacement_path and supported:
+            status = "已指定替换"
+        elif supported:
+            status = "原始"
+        else:
+            status = "暂不支持"
+        items.append(
+            {
+                "name": slot_name,
+                "display_name": str(item.get("display_name", slot_name)),
+                "extension": str(item.get("extension", "")),
+                "supported": supported,
+                "status": status,
+                "replacement_path": replacement_path,
+                "kind": str(item.get("kind", "file")),
+                "container_name": str(item.get("container_name", "")),
+                "member_index": item.get("member_index"),
+                "member_name": str(item.get("member_name", "")),
+                "hint": str(item.get("hint", "")),
+                "replacement_info": replacement,
+                "mode_label": _font_mode_label(str(replacement.get("mode", SAFE_FONT_MODE))),
+            }
+        )
+    return items
+
+
+def _theme_studio_stage_font_replacement(
+    self: ThemeStudio,
+    slot_name: str,
+    source_path: Path,
+    mode: str = SAFE_FONT_MODE,
+) -> Path:
+    slot = next((item for item in self.list_fonts() if item["name"] == slot_name), None)
+    if slot is None:
+        raise StudioError(f"没有找到字体槽位: {slot_name}")
+    if not bool(slot["supported"]):
+        raise StudioError(f"{slot_name} 当前不是可替换的 .ttf 槽位")
+    if mode not in {SAFE_FONT_MODE, EXPERIMENTAL_FONT_MODE}:
+        raise StudioError(f"Unknown font replacement mode: {mode}")
+    if mode == EXPERIMENTAL_FONT_MODE and slot_name != EXPERIMENTAL_HEITI_SC_SLOT:
+        raise StudioError("实验性自动处理当前只支持 STHeiti-Medium.ttc / Heiti SC")
+    if source_path.suffix.lower() != ".ttf":
+        raise StudioError("当前只支持导入 .ttf 字体文件")
+    if not source_path.exists():
+        raise StudioError(f"没有找到要导入的字体文件: {source_path}")
+    try:
+        source_info = _analyze_font_file(source_path)
+    except Exception as exc:
+        raise StudioError("选中的文件不是可用的 TrueType 字体") from exc
+
+    member_window_bytes: int | None = None
+    if str(slot.get("kind")) == "ttc-member":
+        container_bytes = _read_font_container_bytes(WORK_RSRC_BASE, str(slot.get("container_name") or ""))
+        member_window_bytes = _ttc_member_window_bytes(container_bytes, int(slot.get("member_index", 0)))
+
+    target_bytes = _read_font_slot_bytes(WORK_RSRC_BASE, slot)
+    target_font = ttLib.TTFont(io.BytesIO(target_bytes))
+    temp_subset_path: Path | None = None
+    safe_name = slot_name.replace("::", "__").replace("/", "_")
+    staged_path = WORK_FONTS / f"{safe_name}.{mode}.ttf"
+    WORK_FONTS.mkdir(parents=True, exist_ok=True)
+    replacements = _load_font_replacements()
+    old_entry = replacements.get(slot_name, {})
+    old_staged_path = Path(str(old_entry.get("staged_path", "")))
+    try:
+        target_info = _font_analysis(target_font, size_bytes=len(target_bytes))
+        if mode == SAFE_FONT_MODE:
+            _copy_file(source_path, staged_path)
+        else:
+            temp_subset_path = WORK_FONTS / f"{safe_name}.subset.ttf"
+            _subset_font_to_text(source_path, temp_subset_path, _default_heiti_sc_subset_text())
+            processed_font = ttLib.TTFont(str(temp_subset_path))
+            try:
+                _apply_target_font_identity(processed_font, target_font)
+                output = io.BytesIO()
+                processed_font.save(output)
+                staged_path.write_bytes(output.getvalue())
+            finally:
+                processed_font.close()
+    finally:
+        target_font.close()
+        if temp_subset_path and temp_subset_path.exists():
+            temp_subset_path.unlink()
+
+    if old_staged_path and old_staged_path.exists() and old_staged_path != staged_path:
+        with contextlib.suppress(OSError):
+            old_staged_path.unlink()
+
+    staged_info = _analyze_font_file(staged_path)
+    notes, warnings, risk_level = _build_font_import_report(
+        slot,
+        source_info,
+        target_info,
+        staged_info,
+        mode=mode,
+        member_window_bytes=member_window_bytes,
+    )
+
+    replacements[slot_name] = {
+        "source_path": str(source_path.resolve()),
+        "staged_path": str(staged_path.resolve()),
+        "mode": mode,
+        "processing_summary": "实验性自动处理后写入" if mode == EXPERIMENTAL_FONT_MODE else "安全写入（已处理字体）",
+        "subset_profile": HEITI_SC_SUBSET_PROFILE if mode == EXPERIMENTAL_FONT_MODE else "",
+        "source_size_bytes": int(source_info.get("size_bytes", 0)),
+        "source_glyph_count": int(source_info.get("glyph_count", 0)),
+        "source_vendor_id": str(source_info.get("vendor_id", "")),
+        "staged_size_bytes": int(staged_info.get("size_bytes", 0)),
+        "staged_glyph_count": int(staged_info.get("glyph_count", 0)),
+        "staged_vendor_id": str(staged_info.get("vendor_id", "")),
+        "target_size_bytes": int(target_info.get("size_bytes", 0)),
+        "target_glyph_count": int(target_info.get("glyph_count", 0)),
+        "target_vendor_id": str(target_info.get("vendor_id", "")),
+        "risk_level": risk_level,
+        "notes": notes,
+        "warnings": warnings,
+    }
+    _save_font_replacements(replacements)
+    return staged_path
+
+
+def _theme_studio_apply_font_replacements(self: ThemeStudio, rsrc_path: Path, log: LogFn) -> list[str]:
+    replacements = _load_font_replacements()
+    if not replacements:
+        return []
+
+    font_items = {str(item["name"]): item for item in self.list_fonts()}
+    fat = PyFatFS.PyFatFS(str(rsrc_path), read_only=False)
+    applied: list[str] = []
+    try:
+        for slot_name, entry in replacements.items():
+            slot = font_items.get(slot_name)
+            if not slot or not bool(slot.get("supported")):
+                log(f"字体槽位暂不支持替换，已跳过: {slot_name}")
+                continue
+
+            staged_path = Path(str(entry.get("staged_path", "")))
+            if not staged_path.exists():
+                log(f"没有找到已暂存的替换字体，已跳过: {slot_name}")
+                continue
+
+            slot_kind = str(slot.get("kind", "file"))
+            container_name = str(slot.get("container_name") or slot_name)
+            fs_path = f"/Resources/Fonts/{container_name}"
+            mode = str(entry.get("mode", SAFE_FONT_MODE))
+
+            if slot_kind == "ttc-member":
+                collection = None
+                replacement_font = None
+                try:
+                    with fat.openbin(fs_path, mode="rb") as stream:
+                        container_bytes = stream.read()
+                    collection = ttLib.TTCollection(io.BytesIO(container_bytes))
+                    member_index = int(slot.get("member_index", 0))
+                    original_font = collection.fonts[member_index]
+                    replacement_font = ttLib.TTFont(str(staged_path))
+                    _apply_target_font_identity(replacement_font, original_font)
+                    rebuilt_container = _replace_ttc_member_preserving_shell(container_bytes, member_index, replacement_font)
+
+                    fat.remove(fs_path)
+                    with fat.openbin(fs_path, mode="wb") as stream:
+                        stream.write(rebuilt_container)
+                    applied.append(slot_name)
+                    if mode == EXPERIMENTAL_FONT_MODE:
+                        log(f"已按实验模式预处理后写入字体槽位: {slot_name}")
+                    else:
+                        log(f"已直接写入已处理字体: {slot_name}")
+                except Exception as exc:
+                    raise StudioError(f"写回字体槽位失败: {slot_name} ({exc})") from exc
+                finally:
+                    if replacement_font is not None:
+                        replacement_font.close()
+                    if collection is not None:
+                        collection.close()
+                continue
+
+            original_font = None
+            replacement_font = None
+            try:
+                with fat.openbin(fs_path, mode="rb") as stream:
+                    original_font = ttLib.TTFont(io.BytesIO(stream.read()))
+                replacement_font = ttLib.TTFont(str(staged_path))
+                _apply_target_font_identity(replacement_font, original_font)
+
+                output = io.BytesIO()
+                replacement_font.save(output)
+
+                fat.remove(fs_path)
+                with fat.openbin(fs_path, mode="wb") as stream:
+                    stream.write(output.getvalue())
+                applied.append(slot_name)
+                if mode == EXPERIMENTAL_FONT_MODE:
+                    log(f"已按实验模式预处理后写入字体槽位: {slot_name}")
+                else:
+                    log(f"已直接写入已处理字体: {slot_name}")
+            except Exception as exc:
+                raise StudioError(f"写回字体槽位失败: {slot_name} ({exc})") from exc
+            finally:
+                if replacement_font is not None:
+                    replacement_font.close()
+                if original_font is not None:
+                    original_font.close()
+    finally:
+        fat.close()
+
+    return applied
+
+
+ThemeStudio.list_fonts = _theme_studio_list_fonts
+ThemeStudio.stage_font_replacement = _theme_studio_stage_font_replacement
+ThemeStudio.apply_font_replacements = _theme_studio_apply_font_replacements
