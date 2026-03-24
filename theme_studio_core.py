@@ -94,6 +94,9 @@ DEVICE_PROFILES = {
 
 ARTWORK_GROUPS = [
     {"key": "all", "label": "全部素材", "devices": None},
+    {"key": "n6-icons", "label": "Nano 6 图标", "devices": {"nano6"}},
+    {"key": "n6-wallpapers", "label": "Nano 6 壁纸（全部）", "devices": {"nano6"}},
+    {"key": "n6-wallpapers-thumb", "label": "Nano 6 仅缩略图", "devices": {"nano6"}},
     {"key": "n7-icons", "label": "Nano 7 图标", "devices": {"nano7-2012", "nano7-2015"}},
     {"key": "n7-wallpapers", "label": "Nano 7 壁纸（全部）", "devices": {"nano7-2012", "nano7-2015"}},
     {"key": "n7-wallpapers-full", "label": "Nano 7 壁纸（240x432）", "devices": {"nano7-2012", "nano7-2015"}},
@@ -634,6 +637,16 @@ class ThemeStudio:
         item_id = int(item["id"])
         size = item["size"]
 
+        if device_key == "nano6":
+            if group_key == "n6-icons":
+                return 229442241 <= item_id <= 229442314
+            if group_key == "n6-wallpapers":
+                return 229442315 <= item_id <= 229442371
+            if group_key == "n6-wallpapers-thumb":
+                return 229442338 <= item_id <= 229442352 or (
+                    229442353 <= item_id <= 229442371 and item_id % 2 == 1
+                )
+
         if device_key in {"nano7-2012", "nano7-2015"}:
             if group_key == "n7-icons":
                 return 229442200 <= item_id <= 229442211
@@ -648,6 +661,16 @@ class ThemeStudio:
 
     def describe_artwork_group(self, item: dict[str, str], device_key: str | None = None) -> str:
         resolved_device = device_key or self.load_session().device_key
+        if resolved_device == "nano6":
+            if self._item_matches_group(resolved_device, item, "n6-icons"):
+                return "Nano 6 图标"
+            item_id = int(item["id"])
+            if 229442315 <= item_id <= 229442337 or (229442353 <= item_id <= 229442371 and item_id % 2 == 0):
+                return "Nano 6 壁纸"
+            if self._item_matches_group(resolved_device, item, "n6-wallpapers-thumb"):
+                return "Nano 6 壁纸缩略图"
+            if self._item_matches_group(resolved_device, item, "n6-wallpapers"):
+                return "Nano 6 壁纸相关"
         if resolved_device in {"nano7-2012", "nano7-2015"}:
             if self._item_matches_group(resolved_device, item, "n7-icons"):
                 return "Nano 7 图标"
