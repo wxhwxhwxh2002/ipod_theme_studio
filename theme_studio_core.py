@@ -1603,14 +1603,14 @@ class ThemeStudio:
             raise StudioError(f"缺少官方模板目录: {template_dir}")
 
         with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr("Firmware.MSE", mse_bytes)
             for item in sorted(template_dir.rglob("*")):
                 if item.is_dir():
                     continue
                 arcname = item.relative_to(template_dir).as_posix()
                 if arcname == "Firmware.MSE":
-                    archive.writestr(arcname, mse_bytes)
-                else:
-                    archive.write(item, arcname)
+                    continue
+                archive.write(item, arcname)
         log(f"已按官方模板重新封装 {profile.label} IPSW。")
 
     def _build_community_ipsw(self, source_ipsw: Path, output_path: Path, mse_bytes: bytes, log: LogFn) -> None:
