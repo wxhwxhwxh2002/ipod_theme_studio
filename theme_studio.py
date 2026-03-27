@@ -2355,6 +2355,10 @@ class ThemeStudioApp:
         self.capacity_var = tk.StringVar(value="导入固件后会在这里提示 1888 素材和打包体积变化。")
         self._capacity_refresh_token = 0
         self.group_map: dict[str, str] = {}
+        self.asset_items: list[dict[str, str]] = []
+        self.asset_items_by_name: dict[str, dict[str, str]] = {}
+        self.asset_sort_column: str | None = None
+        self.asset_sort_direction = "default"
 
         self._configure_style()
         self._build_layout()
@@ -2613,16 +2617,18 @@ class ThemeStudioApp:
         self.group_box.grid(row=0, column=1, sticky="ew")
         self.group_box.bind("<<ComboboxSelected>>", self._jump_to_selected_group)
 
-        columns = ("id", "format", "size", "group", "name")
-        self.asset_tree = ttk.Treeview(list_card, columns=columns, show="headings", selectmode="browse")
-        self.asset_tree.heading("id", text="ID")
-        self.asset_tree.heading("format", text="格式")
-        self.asset_tree.heading("size", text="尺寸")
+        columns = ("id", "format", "size", "file_size", "group", "name")
+        self.asset_tree = ttk.Treeview(list_card, columns=columns, show="headings", selectmode="extended")
+        self.asset_tree.heading("id", text="ID", command=lambda: self._toggle_asset_sort("id"))
+        self.asset_tree.heading("format", text="格式", command=lambda: self._toggle_asset_sort("format"))
+        self.asset_tree.heading("size", text="尺寸", command=lambda: self._toggle_asset_sort("size"))
+        self.asset_tree.heading("file_size", text="文件大小", command=lambda: self._toggle_asset_sort("file_size"))
         self.asset_tree.heading("group", text="分组")
         self.asset_tree.heading("name", text="文件名")
         self.asset_tree.column("id", width=92, minwidth=82, stretch=False, anchor="w")
         self.asset_tree.column("format", width=72, minwidth=64, stretch=False, anchor="center")
         self.asset_tree.column("size", width=88, minwidth=78, stretch=False, anchor="center")
+        self.asset_tree.column("file_size", width=98, minwidth=90, stretch=False, anchor="e")
         self.asset_tree.column("group", width=132, minwidth=112, stretch=False, anchor="w")
         self.asset_tree.column("name", width=180, minwidth=140, stretch=True, anchor="w")
         self.asset_tree.grid(row=2, column=0, sticky="nsew")
@@ -2731,7 +2737,7 @@ class ThemeStudioApp:
 
         reduce_btn = tk.Button(
             action_row,
-            text="手动改色彩",
+            text="手动改色彩（可多选）",
             command=self._reduce_color_and_replace,
             **button_style("secondary"),
             relief="flat",
@@ -4478,57 +4484,346 @@ def _theme_studio_reduce_saved_library_asset(self, asset_path: Path, item: dict[
 
 
 def _theme_studio_reduce_color_and_replace(self) -> None:
-    if not self.current_selection:
+    selection = self._selected_asset_names()
+    if not selection:
         messagebox.showinfo("先选素材", "请先在左侧列表中选中一个系统素材。")
         return
 
-    current_format = self.current_selection.split("_", 1)[1].split(".", 1)[0]
-    if current_format == "0004":
-        messagebox.showinfo("当前素材不适用", "这个素材已经是 0004 了，没有更低的格式可再转换。")
+    if len(selection) == 1:
+        current_name = selection[0]
+        current_format = current_name.split("_", 1)[1].split(".", 1)[0]
+        if current_format == "0004":
+            messagebox.showinfo("当前素材不适用", "这个素材已经是 0004 了，没有更低的格式可再转换。")
+            return
+
+        choice = ActionChoiceDialog(
+            self.root,
+            "目标转换格式",
+            f"请选择要把当前 {current_format} 素材转换到哪个更低的格式。",
+            manual_format_conversion_actions_for(current_format),
+        ).show()
+        if choice in {None, "cancel"}:
+            return
+        target_format = choice
+
+        source_path = self.studio.body_dir() / current_name
+        action, strategy = self._open_reduction_decision(source_path, target_format, allow_keep_original=False)
+        if action != "reduced":
+            return
+
+        try:
+            reduced_candidate, reduction_notes = self._create_reduced_candidate(
+                current_name,
+                source_path,
+                target_format,
+                strategy,
+            )
+            new_name, notes = self.studio.replace_artwork_with_format(
+                current_name,
+                reduced_candidate,
+                target_format,
+            )
+        except StudioError as exc:
+            messagebox.showerror("降色失败", str(exc))
+            return
+
+        all_notes = reduction_notes + notes
+        self._append_log("log", f"已把当前素材手动转换到 {target_format}。")
+        self._append_replacement_notes_to_log(all_notes)
+        self.notes_var.set("；".join(all_notes))
+        self._refresh_assets()
+        if self.asset_tree.exists(new_name):
+            self.asset_tree.selection_set(new_name)
+            self.asset_tree.focus(new_name)
+            self.asset_tree.see(new_name)
+            self.current_selection = new_name
+            self._on_asset_selected()
         return
 
-    choice = ActionChoiceDialog(
+    current_formats = [name.split("_", 1)[1].split(".", 1)[0] for name in selection]
+    actions = _batch_reduction_actions_for_formats(current_formats)
+    if not actions:
+        messagebox.showinfo("批量降色不可用", "当前选中的素材没有共同可用的更低目标格式。")
+        return
+
+    target_format = ActionChoiceDialog(
         self.root,
-        "目标转换格式",
-        f"请选择要把当前 {current_format} 素材转换到哪个更低的格式。",
-        manual_format_conversion_actions_for(current_format),
+        "批量目标格式",
+        f"已选择 {len(selection)} 张素材，请选择统一降到哪个格式。",
+        actions,
     ).show()
-    if choice in {None, "cancel"}:
-        return
-    target_format = choice
-
-    source_path = self.studio.body_dir() / self.current_selection
-    action, strategy = self._open_reduction_decision(source_path, target_format, allow_keep_original=False)
-    if action != "reduced":
+    if target_format in {None, "cancel"}:
         return
 
-    try:
-        reduced_candidate, reduction_notes = self._create_reduced_candidate(
-            self.current_selection,
-            source_path,
-            target_format,
-            strategy,
-        )
-        new_name, notes = self.studio.replace_artwork_with_format(
-            self.current_selection,
-            reduced_candidate,
-            target_format,
-        )
-    except StudioError as exc:
-        messagebox.showerror("降色失败", str(exc))
+    strategy = ActionChoiceDialog(
+        self.root,
+        "批量降色策略",
+        "请选择本次批量降色统一使用的策略。",
+        [
+            ("保守", "保守（尽量少引入抖动）", True),
+            ("平滑", "平滑（过渡更柔和）", False),
+            ("锐利", "锐利（线条更清晰）", False),
+            ("cancel", "取消", False),
+        ],
+    ).show()
+    if strategy in {None, "cancel"}:
         return
 
-    all_notes = reduction_notes + notes
-    self._append_log("log", f"已把当前 1888 素材手动转换到 {target_format}。")
-    self._append_replacement_notes_to_log(all_notes)
-    self.notes_var.set("；".join(all_notes))
+    converted_names: list[str] = []
+    changed_count = 0
+    unchanged_count = 0
+    errors: list[str] = []
+    note_samples: list[str] = []
+
+    for name in selection:
+        current_format = name.split("_", 1)[1].split(".", 1)[0]
+        if current_format == target_format:
+            converted_names.append(name)
+            unchanged_count += 1
+            continue
+
+        source_path = self.studio.body_dir() / name
+        try:
+            reduced_candidate, reduction_notes = self._create_reduced_candidate(
+                name,
+                source_path,
+                target_format,
+                strategy,
+            )
+            new_name, notes = self.studio.replace_artwork_with_format(
+                name,
+                reduced_candidate,
+                target_format,
+            )
+        except StudioError as exc:
+            errors.append(f"{name}: {exc}")
+            continue
+
+        converted_names.append(new_name)
+        changed_count += 1
+        if len(note_samples) < 6:
+            note_samples.extend(reduction_notes + notes)
+        self._append_log("log", f"已批量将 {name} 转换到 {target_format} -> {new_name}")
+
+    if changed_count == 0 and unchanged_count == 0:
+        messagebox.showerror("批量降色失败", "\n".join(errors[:8]) if errors else "没有素材被成功处理。")
+        return
+
+    if changed_count:
+        self._append_log("log", f"已批量完成 {changed_count} 张素材的降色，目标格式为 {target_format}。")
+    if unchanged_count:
+        self._append_log("log", f"其中 {unchanged_count} 张素材原本已经是 {target_format}，已保持不变。")
+    for message in errors[:8]:
+        self._append_log("error", message)
+    if len(errors) > 8:
+        self._append_log("error", f"其余 {len(errors) - 8} 条错误已省略。")
+
+    self._append_replacement_notes_to_log(note_samples)
+    if errors:
+        self.notes_var.set(f"批量降色已完成 {changed_count} 张，另有 {len(errors)} 张失败。")
+    else:
+        self.notes_var.set(f"批量降色已完成 {changed_count} 张素材。")
+
     self._refresh_assets()
-    if self.asset_tree.exists(new_name):
-        self.asset_tree.selection_set(new_name)
-        self.asset_tree.focus(new_name)
-        self.asset_tree.see(new_name)
-        self.current_selection = new_name
+    existing = [name for name in converted_names if self.asset_tree.exists(name)]
+    if existing:
+        self.asset_tree.selection_set(*existing)
+        self.asset_tree.focus(existing[0])
+        self.asset_tree.see(existing[0])
+        self.current_selection = existing[0]
         self._on_asset_selected()
+
+
+def _asset_sort_key(item: dict[str, str], column: str):
+    if column == "id":
+        return int(item.get("id", "0") or 0)
+    if column == "format":
+        image_format = item.get("format", "")
+        return (FORMAT_RANK.get(image_format, 999), image_format)
+    if column == "size":
+        width = int(item.get("width", "0") or 0)
+        height = int(item.get("height", "0") or 0)
+        return (width * height, width, height)
+    if column == "file_size":
+        return int(item.get("file_bytes", "0") or 0)
+    return item.get(column, "")
+
+
+def _batch_reduction_actions_for_formats(formats: list[str]) -> list[tuple[str, str, bool]]:
+    if not formats:
+        return []
+
+    allowed_sets = []
+    for image_format in formats:
+        current_rank = FORMAT_RANK.get(image_format)
+        if current_rank is None:
+            return []
+        allowed = {candidate for candidate in LOW_FORMAT_ORDER if FORMAT_RANK[candidate] <= current_rank}
+        allowed_sets.append(allowed)
+
+    common = set.intersection(*allowed_sets)
+    ordered_targets = []
+    for candidate in reversed(LOW_FORMAT_ORDER):
+        if candidate not in common:
+            continue
+        if any(FORMAT_RANK[image_format] > FORMAT_RANK[candidate] for image_format in formats):
+            ordered_targets.append(candidate)
+
+    if not ordered_targets:
+        return []
+
+    labels = {
+        "0565": "转到 0565（RGB565）",
+        "0065": "转到 0065（<=65535 色）",
+        "0064": "转到 0064（<=255 色）",
+        "0008": "转到 0008（8 位灰度）",
+        "0004": "转到 0004（4 位灰度）",
+    }
+    return [(target, labels[target], index == 0) for index, target in enumerate(ordered_targets)] + [
+        ("cancel", "取消", False)
+    ]
+
+
+def _theme_studio_selected_asset_names(self) -> list[str]:
+    return [name for name in self.asset_tree.selection() if self.asset_tree.exists(name)]
+
+
+def _theme_studio_sorted_asset_items(self, items: list[dict[str, str]]) -> list[dict[str, str]]:
+    sort_column = getattr(self, "asset_sort_column", None)
+    sort_direction = getattr(self, "asset_sort_direction", "default")
+    if not sort_column or sort_direction == "default":
+        return list(items)
+    return sorted(
+        items,
+        key=lambda item: _asset_sort_key(item, sort_column),
+        reverse=sort_direction == "desc",
+    )
+
+
+def _theme_studio_update_asset_heading_labels(self) -> None:
+    heading_labels = {
+        "id": "ID",
+        "format": "格式",
+        "size": "尺寸",
+        "file_size": "文件大小",
+    }
+    for column, label in heading_labels.items():
+        suffix = ""
+        if getattr(self, "asset_sort_column", None) == column:
+            if self.asset_sort_direction == "asc":
+                suffix = " ▲"
+            elif self.asset_sort_direction == "desc":
+                suffix = " ▼"
+        self.asset_tree.heading(column, text=label + suffix, command=lambda col=column: self._toggle_asset_sort(col))
+    self.asset_tree.heading("group", text="分组")
+    self.asset_tree.heading("name", text="文件名")
+
+
+def _theme_studio_toggle_asset_sort(self, column: str) -> None:
+    current_column = getattr(self, "asset_sort_column", None)
+    current_direction = getattr(self, "asset_sort_direction", "default")
+    if current_column != column:
+        self.asset_sort_column = column
+        self.asset_sort_direction = "asc"
+    elif current_direction == "asc":
+        self.asset_sort_direction = "desc"
+    elif current_direction == "desc":
+        self.asset_sort_column = None
+        self.asset_sort_direction = "default"
+    else:
+        self.asset_sort_column = column
+        self.asset_sort_direction = "asc"
+    self._refresh_assets()
+
+
+def _theme_studio_refresh_assets(self) -> None:
+    previous_selection = self._selected_asset_names() if hasattr(self, "_selected_asset_names") else []
+    self.asset_tree.delete(*self.asset_tree.get_children())
+    items = self.studio.list_artwork(self._selected_group_key())
+    self.asset_items = items
+    self.asset_items_by_name = {item["name"]: item for item in items}
+
+    for item in self._sorted_asset_items(items):
+        self.asset_tree.insert(
+            "",
+            "end",
+            iid=item["name"],
+            values=(
+                item["id"],
+                item["format"],
+                item["size"],
+                item.get("file_size", ""),
+                item.get("group", "未分组"),
+                item["name"],
+            ),
+        )
+
+    self._update_asset_heading_labels()
+
+    if items:
+        self.status_var.set(f"已载入 {len(items)} 张素材。")
+    else:
+        self.status_var.set("当前还没有可浏览的素材。")
+
+    restored = [name for name in previous_selection if self.asset_tree.exists(name)]
+    if restored:
+        self.asset_tree.selection_set(*restored)
+        self.asset_tree.focus(restored[0])
+        self.asset_tree.see(restored[0])
+        self.current_selection = restored[0]
+        self._on_asset_selected()
+    else:
+        self.current_selection = None
+        self._clear_preview()
+        self.meta_label.configure(text="")
+
+    self._update_capacity_hint()
+
+
+def _theme_studio_on_asset_selected(self, _event=None) -> None:
+    selection = self._selected_asset_names()
+    if not selection:
+        self.current_selection = None
+        return
+
+    name = selection[0]
+    path = self.studio.body_dir() / name
+    item = self.asset_items_by_name.get(name, {})
+    self.current_selection = name
+
+    with Image.open(path) as image:
+        preview = image.convert("RGBA")
+        preview.thumbnail((PREVIEW_CANVAS_WIDTH - 20, PREVIEW_CANVAS_HEIGHT - 20))
+        self.preview_image = ImageTk.PhotoImage(preview)
+        size = f"{image.size[0]}x{image.size[1]}"
+
+    self._draw_preview()
+
+    image_id, image_format = path.stem.split("_")
+    meta_lines = []
+    if len(selection) > 1:
+        meta_lines.append(f"当前已选择: {len(selection)} 项（以下显示第一项）")
+    meta_lines.extend(
+        [
+            f"文件名: {path.name}",
+            f"素材 ID: {image_id}",
+            f"格式码: {image_format}",
+            f"分组:   {item.get('group', self.studio.describe_artwork_group({'id': image_id, 'size': size}, self._current_device()))}",
+            f"尺寸:   {size}",
+            f"大小:   {item.get('file_size', '')}",
+            f"路径:   {path}",
+        ]
+    )
+    self.meta_label.configure(text="\n".join(meta_lines))
+
+    if image_format in {"0064", "0065"}:
+        self.notes_var.set("调色板素材：程序会先尝试保留原格式；如果颜色超限，会自动改成同 ID 的 _1888.png。")
+    elif image_format in {"0004", "0008"}:
+        self.notes_var.set("灰度素材：替换图只要尺寸一致即可，打包时会自动转灰度。")
+    elif image_format == "0565":
+        self.notes_var.set("RGB565 素材：替换图尺寸一致即可，打包时会自动转换为 16 位色。")
+    else:
+        self.notes_var.set("RGBA 素材：可以直接用任意同尺寸 PNG 替换。")
 
 
 def _theme_studio_show_about(self) -> None:
@@ -4951,6 +5246,12 @@ ThemeStudioApp._prepare_replacement_candidate = _theme_studio_prepare_replacemen
 ThemeStudioApp._choose_replacement_candidate = _theme_studio_choose_replacement_candidate
 ThemeStudioApp._import_file_to_saved_assets = _theme_studio_import_file_to_saved_assets
 ThemeStudioApp._reduce_saved_library_asset = _theme_studio_reduce_saved_library_asset
+ThemeStudioApp._selected_asset_names = _theme_studio_selected_asset_names
+ThemeStudioApp._sorted_asset_items = _theme_studio_sorted_asset_items
+ThemeStudioApp._update_asset_heading_labels = _theme_studio_update_asset_heading_labels
+ThemeStudioApp._toggle_asset_sort = _theme_studio_toggle_asset_sort
+ThemeStudioApp._refresh_assets = _theme_studio_refresh_assets
+ThemeStudioApp._on_asset_selected = _theme_studio_on_asset_selected
 ThemeStudioApp._reduce_color_and_replace = _theme_studio_reduce_color_and_replace
 ThemeStudioApp._show_about = _theme_studio_show_about
 FontSlotBrowserDialog._build_layout = _font_slot_build_layout

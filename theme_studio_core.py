@@ -831,6 +831,14 @@ def _format_bytes(size: int) -> str:
     return f"{size / (1024 * 1024):.2f} MB"
 
 
+def _format_file_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.2f} MB"
+
+
 def _silverdb_write_budget(rsrc_path: Path, packed_size: int) -> dict[str, int] | None:
     if not rsrc_path.exists():
         return None
@@ -994,6 +1002,7 @@ class ThemeStudio:
             with Image.open(path) as image:
                 width, height = image.size
             image_id, image_format = path.stem.split("_")
+            file_bytes = path.stat().st_size
             items.append(
                 {
                     "id": image_id,
@@ -1001,6 +1010,8 @@ class ThemeStudio:
                     "size": f"{width}x{height}",
                     "width": str(width),
                     "height": str(height),
+                    "file_bytes": str(file_bytes),
+                    "file_size": _format_file_size(file_bytes),
                     "name": path.name,
                     "path": str(path),
                 }
